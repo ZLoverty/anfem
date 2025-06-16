@@ -1,20 +1,16 @@
 from dolfinx.io import gmshio
 from mpi4py import MPI
 from dolfinx import fem, plot, mesh, io
-from dolfinx.fem.petsc import LinearProblem
 from basix.ufl import element, mixed_element
-import pyvista
 from ufl import TestFunction, TrialFunction, FacetNormal, Identity, grad, div, inner, dx, ds, transpose, dot, as_vector, outer, lhs, rhs, TestFunctions, TrialFunctions, split, nabla_grad, derivative
-pyvista.set_jupyter_backend("static")
 import numpy as np
 from petsc4py import PETSc
-from dolfinx.fem.petsc import assemble_matrix, assemble_vector, apply_lifting, create_vector, set_bc, NonlinearProblem
 from dolfinx.nls.petsc import NewtonSolver
-import ufl
+import time
 
 # Simulation parameters
 T = 10
-dt = 0.1
+dt = .1
 
 # Define simulation domain: load from .msh file
 mesh_file = "annulus.msh"
@@ -22,14 +18,11 @@ domain, cell_tags, facet_tags = gmshio.read_from_msh(mesh_file, MPI.COMM_WORLD, 
 
 # Define constants
 alpha = fem.Constant(domain, PETSc.ScalarType(5.0))
-mu = fem.Constant(domain, PETSc.ScalarType(1.0))
-gamma = fem.Constant(domain, PETSc.ScalarType(1.0))
 lambda_ = fem.Constant(domain, PETSc.ScalarType(0.7))
-C = fem.Constant(domain, PETSc.ScalarType(1.0))
-K = fem.Constant(domain, PETSc.ScalarType(1.0))
-beta1 = fem.Constant(domain, PETSc.ScalarType(0.6))
-beta2 = fem.Constant(domain, PETSc.ScalarType((1.6 + 1.0) / (1.6**2)))
-EA = fem.Constant(domain, PETSc.ScalarType(0.01))
+rho = 1.6
+beta1 = fem.Constant(domain, PETSc.ScalarType(rho-1))
+beta2 = fem.Constant(domain, PETSc.ScalarType((rho+1)/rho**2))
+EA = fem.Constant(domain, PETSc.ScalarType(0.1))
 k = fem.Constant(domain, PETSc.ScalarType(dt))
 
 # Define individual elements
@@ -62,61 +55,52 @@ w = fem.Function(W)
 
 # define boundary conditions - noslip velocity
 def walls(x):
-    return np.logical_or(np.isclose(np.linalg.norm(x, axis=0), .5), np.isclose(np.linalg.norm(x, axis=0), 1.0))
+    return np.logical_or(np.isclose(np.linalg.norm(x, axis=0), 5.0), np.isclose(np.linalg.norm(x, axis=0), 10.0))
 
 wall_dofs = fem.locate_dofs_geometrical(V_u, walls)
 noslip = fem.dirichletbc(PETSc.ScalarType((0, 0)), wall_dofs, V_u)
 bcu = [noslip]
 
+
+
 # Weak forms of governing equations
+
 
 # Navier-Stokes equations
 F1 = (
-    inner(nabla_grad(u), nabla_grad(v)) * dx
-    + inner(v, nabla_grad(p)) * dx
-    + q * div(u) * dx
-    - inner(alpha * div(Q_n), v) * dx
+    - inner(nabla_grad(u), nabla_grad(v)) * dx
+    + p * div(v) * dx
+    - q * div(u) * dx
+    + alpha * inner(Q_n, nabla_grad(v)) * dx
 )
 
 a = fem.form(lhs(F1))
 L = fem.form(rhs(F1))
 
-# assemble matrix A and b
-A = assemble_matrix(a)
-A.assemble()
-b = create_vector(L)
-
-# configure a solver for u
-solver1 = PETSc.KSP().create(domain.comm)
-solver1.setOperators(A)
-solver1.setType(PETSc.KSP.Type.BCGS)
-pc1 = solver1.getPC()
-pc1.setType(PETSc.PC.Type.HYPRE)
-pc1.setHYPREType("boomeramg")
+problem1 = fem.petsc.LinearProblem(a, L, bcs=bcu, u=w)
 
 # Q-tensor evolution equation
 u_grad = nabla_grad(u_n)
-Omega = 0.5 * (u_grad + transpose(u_grad))
-E = 0.5 * (u_grad - transpose(u_grad))
-dFdQ_bulk = C * beta1 * Q_ + C * beta2 * inner(Q_, Q_) * Q_ + K * div(nabla_grad(Q_))
+Omega = 0.5 * (u_grad - transpose(u_grad))
+E = 0.5 * (u_grad + transpose(u_grad))
 n = FacetNormal(domain)
-Qb = outer(n, n) - 0.5 * Identity(domain.geometry.dim)
-dFdQ_surf = EA * (Q_ - Qb)
+tangent = as_vector([-n[1], n[0]])
+Qb = outer(tangent, tangent) - 0.5 * Identity(domain.geometry.dim)
 
 F2 = (
     inner((Q_ - Q_n) / k, phi) * dx
-    + inner(dot(u_n, nabla_grad(Q_)), phi) * dx
-    - inner(Q_*Omega - Omega*Q_, phi) * dx
+    + inner(dot(u_n, nabla_grad(Q_)) , phi) * dx
+    - inner(dot(Q_, Omega) - dot(Omega, Q_), phi) * dx
     - inner(lambda_ * E, phi) * dx
-    - inner(dFdQ_bulk / gamma, phi) * dx
-    - inner(dFdQ_surf / gamma, phi) * ds
+    - inner(beta1 * Q_ - beta2 * inner(Q_, Q_) * Q_, phi) * dx
+    + inner(nabla_grad(Q_), nabla_grad(phi)) * dx
+    + inner(EA * (Q_ - Qb), phi) * ds 
 )
 
 # jacobian
-dQ = TrialFunction(V_Q)
-J = derivative(F2, Q_, dQ)
+J = derivative(F2, Q_)
 
-problem = NonlinearProblem(F2, Q_, J=J)
+problem = fem.petsc.NonlinearProblem(F2, Q_, J=J)
 solver2 = NewtonSolver(domain.comm, problem)
 
 # Set initial states
@@ -137,6 +121,10 @@ r[r < 1e-10] = 1.0
 
 # Compute the tangent (director) d = (-y, x)/|r|
 d = np.column_stack((-x[:, 1], x[:, 0])) / r[:, None]
+rand = 0.5 + np.random.rand(*d.shape)
+d *= rand
+d /= np.linalg.norm(d, axis=1)[:, None]  # Normalize d
+
 
 # Compute the Q-tensor: Q = S*(d⊗d - I/2)
 Q_vals = np.einsum("ni,nj->nij", d, d) - 0.5 * np.eye(2)
@@ -144,41 +132,62 @@ Q_vals = np.einsum("ni,nj->nij", d, d) - 0.5 * np.eye(2)
 # Reshape Q_vals to match the flattened dolfinx Function vector and set Q_n
 Q_n.x.array[:] = Q_vals.flatten()
 
+# Q_.interpolate(Q_n)
+
+# Q_n.x.scatter_forward()
+# Q_.x.scatter_forward()
+
 # Time stepping
 # helper function for visualizing Q
 
-expr = ufl.as_vector([Q_n[0, 0], Q_n[0, 1]])
-expr_interp = fem.Expression(expr, V_vis.element.interpolation_points())
+# expr = ufl.as_vector([Q_n[0, 0], Q_n[0, 1]])
+# expr_interp = fem.Expression(expr, V_vis.element.interpolation_points())
+
+def Q2D(Q_tensor):
+    Q_e = Q_tensor.x.array.reshape(-1, 2, 2)
+    num_pts = Q_e.shape[0]
+    d_vals = np.zeros((num_pts, 2))
+
+    for i in range(num_pts):
+        # Get eigenvector with max eigenvalue
+        vals, vecs = np.linalg.eigh(Q_e[i])
+        d = vecs[:, np.argmax(vals)]
+
+        d_vals[i, :] = d
+    return d_vals
 
 t = 0
 
-with io.XDMFFile(domain.comm, "result.xdmf", "w") as xdmf:
-    xdmf.write_mesh(domain)   
-    while t < T:
-        u_vis.interpolate(u_n)
-        Q_vis.interpolate(expr_interp)
-        xdmf.write_function(u_vis, t)
-        xdmf.write_function(Q_vis, t)
-        xdmf.write_function(p_n, t)
-        
-        t += dt
-        print(f"Time: {t:.2f}")
-        # solve for u
-        b.zeroEntries()
-        assemble_vector(b, L)
-        apply_lifting(b, [a], [bcu])
-        b.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
-        set_bc(b, bcu)
-        solver1.solve(b, w.x.petsc_vec)
-        u_sol, p_sol = w.split()
+writer = io.VTXWriter(domain.comm, "result1.pvd", output=[p_n, u_vis, Q_vis]) 
 
-        u_n.interpolate(u_sol)
-        u_n.x.scatter_forward()
-        p_n.interpolate(p_sol)
-        p_n.x.scatter_forward()
+rank = MPI.COMM_WORLD.Get_rank()
 
-        # solve for Q
-        n, converged = solver2.solve(Q_)
-        Q_n.interpolate(Q_)
-        Q_n.x.scatter_forward()
+while t < T:
+    u_vis.interpolate(u_n)
+    Q_vis.x.array[:] = Q2D(Q_n).flatten()
+    writer.write(t)
+
+    t += dt
+    if rank == 0:
+        print(f"{time.asctime()}: t={t:.2f}", flush=True)
+
+    problem1.solve()
+    u_sol, p_sol = w.split()
+
+    u_n.interpolate(u_sol)
+    u_n.x.scatter_forward()
+    p_n.interpolate(p_sol)
+    p_n.x.scatter_forward()
+
+    
+    # u_n.x.array[:] = 0
+    # u_n.x.scatter_forward()
+
+    # --- FIX: Provide a good initial guess for the Newton solver ---
+    # Q_.interpolate(Q_n)
+
+    # solve for Q
+    n, converged = solver2.solve(Q_)
+    Q_n.interpolate(Q_)
+    Q_n.x.scatter_forward()
 
