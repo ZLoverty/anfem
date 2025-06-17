@@ -39,6 +39,8 @@ parser.add_argument("--alpha", type=float, default=5, help="Dimensionless activi
 parser.add_argument("--lambda_", type=float, default=0.7, help="Flow alignment parameter.")
 parser.add_argument("--rho_beta", type=float, default=1.6, help="parameters in LDG free energy functional, determines whether the system would favor nematic alignment (rho>1) or isotropic (rho<1).")
 parser.add_argument("--ea", type=float, default=0.1, help="anchor strength")
+parser.add_argument("--wall_tag", type=int, default=5, help="channel wall tag number")
+parser.add_argument("-o", "--save_dir", type=str, default="result.pvd")
 args = parser.parse_args()
 
 # Simulation parameters
@@ -91,17 +93,14 @@ w = fem.Function(W)
 # def walls(x):
 #     return np.logical_or(np.isclose(np.linalg.norm(x, axis=0), 5.0), np.isclose(np.linalg.norm(x, axis=0), 10.0))
 
-
-
 bcu = []
-if facet_tags.find(3).size:
-    print("create wall")
-    wall_dofs = fem.locate_dofs_topological(V_u, 1, facet_tags.find(3))
+if facet_tags.find(args.wall_tag).size:
+    print(f"Detect walls tagged as {args.wall_tag}")
+    wall_dofs = fem.locate_dofs_topological(V_u, 1, facet_tags.find(args.wall_tag))
     noslip = fem.dirichletbc(PETSc.ScalarType((0, 0)), wall_dofs, V_u)
     bcu.append(noslip)
 
 # Weak forms of governing equations
-
 
 # Navier-Stokes equations
 F1 = (
@@ -176,7 +175,7 @@ def Q2D(Q_tensor):
 
 t = 0
 
-writer = io.VTXWriter(domain.comm, "result1.pvd", output=[p_n, u_vis, Q_vis]) 
+writer = io.VTXWriter(domain.comm, f"{args.save_dir}", output=[p_n, u_vis, Q_vis]) 
 
 rank = MPI.COMM_WORLD.Get_rank()
 
