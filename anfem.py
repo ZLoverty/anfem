@@ -19,7 +19,7 @@ python anfem.py mesh_dir -t T --dt DT --alpha ALPHA --lambda LAMBDA --rho_beta R
 
 from mpi4py import MPI
 from petsc4py import PETSc
-from dolfinx import fem, io
+from dolfinx import fem, io, default_scalar_type
 from dolfinx.nls.petsc import NewtonSolver
 from basix.ufl import element, mixed_element
 from ufl import TestFunction, FacetNormal, Identity, div, inner, dx, ds, transpose, dot, as_vector, outer, lhs, rhs, TestFunctions, TrialFunctions, nabla_grad, derivative
@@ -39,7 +39,7 @@ parser.add_argument("--alpha", type=float, default=5, help="Dimensionless activi
 parser.add_argument("--lambda_", type=float, default=0.7, help="Flow alignment parameter.")
 parser.add_argument("--rho_beta", type=float, default=1.6, help="parameters in LDG free energy functional, determines whether the system would favor nematic alignment (rho>1) or isotropic (rho<1).")
 parser.add_argument("--ea", type=float, default=0.1, help="anchor strength")
-parser.add_argument("--wall_tag", type=int, default=5, help="channel wall tag number")
+parser.add_argument("--wall_tag", type=int, nargs="+", default=[5], help="channel wall tag number")
 parser.add_argument("-o", "--save_dir", type=str, default="result.pvd")
 args = parser.parse_args()
 
@@ -50,6 +50,12 @@ mesh_dir = args.mesh_dir
 
 # Define simulation domain: load from .msh file
 domain, cell_tags, facet_tags = io.gmshio.read_from_msh(mesh_dir, MPI.COMM_WORLD, 0, gdim=2)
+
+all_tags = np.unique(facet_tags.values)
+print("----------------------------------------------------------")
+print(f"All unique facet tags found in mesh: {all_tags}")
+print("Please ensure the --wall_tag you provide is in this list.")
+print("----------------------------------------------------------")
 
 # Define constants
 alpha = fem.Constant(domain, PETSc.ScalarType(args.alpha))
@@ -72,7 +78,7 @@ w_el = mixed_element([u_el, p_el])
 W = fem.functionspace(domain, w_el)
 V_Q = fem.functionspace(domain, Q_el)
 V_vis = fem.functionspace(domain, vis_el)
-V_u, _ = W.sub(0).collapse()
+V_u, u_to_w_map = W.sub(0).collapse()
 V_p, _ = W.sub(1).collapse()
 
 # Define functions
@@ -93,12 +99,59 @@ w = fem.Function(W)
 # def walls(x):
 #     return np.logical_or(np.isclose(np.linalg.norm(x, axis=0), 5.0), np.isclose(np.linalg.norm(x, axis=0), 10.0))
 
+# bcu = []
+# for tag in args.wall_tag:
+#     if facet_tags.find(tag).size:
+#         print(f"Detect walls tagged as {tag}")
+#         wall_dofs = fem.locate_dofs_topological(V_u, 1, facet_tags.find(tag))
+#         noslip = fem.dirichletbc(PETSc.ScalarType((0, 0)), wall_dofs, V_u)
+#         bcu.append(noslip)
+
+# --- New Boundary Condition Block ---
+# ======================================================================
+# --- Definitive Boundary Condition Definition ---
+print("--- Using direct subspace and fem.Function for BC definition ---")
 bcu = []
-if facet_tags.find(args.wall_tag).size:
-    print(f"Detect walls tagged as {args.wall_tag}")
-    wall_dofs = fem.locate_dofs_topological(V_u, 1, facet_tags.find(args.wall_tag))
-    noslip = fem.dirichletbc(PETSc.ScalarType((0, 0)), wall_dofs, V_u)
-    bcu.append(noslip)
+
+# 1. Get the un-collapsed velocity subspace from the mixed space W
+
+# 2. Create a fem.Function on this subspace to hold the (0,0) value.
+#    This is the crucial step mandated by the final error message.
+noslip_value = fem.Function(V_u)
+noslip_value.x.array[:] = 0
+# Note: The default values for a new function are already zero, so we don't 
+# need to explicitly set them, but noslip_value.x.array[:] = 0 would also work.
+
+
+# 3. Your loop to find DoFs on one or more tagged boundaries.
+for tag in args.wall_tag:
+    # Locate DoFs for the velocity component DIRECTLY IN THE MIXED SPACE W
+    wall_dofs_u = fem.locate_dofs_topological(V_u, 1, facet_tags.find(tag))
+    wall_dofs = np.array([u_to_w_map[i] for i in wall_dofs_u])
+
+    if not wall_dofs.size > 0:
+        print(f"WARNING: No DoFs found for tag {tag}. Skipping.")
+        continue
+
+    print(f"SUCCESS: Found {wall_dofs.size} DoFs for tag {tag}.")
+
+    # 4. Create the BC object using the FUNCTION, not the raw value (0,0).
+    u_zero = np.array((0,) * domain.geometry.dim, dtype=default_scalar_type)
+    noslip_bc = fem.dirichletbc(noslip_value, wall_dofs) # V_u_subspace is not needed here
+    bcu.append(noslip_bc)
+
+if not bcu:
+    print("\n\n!!! CRITICAL WARNING: The boundary condition list 'bcu' is EMPTY. !!!\n\n")
+else:
+    print(f"--- Successfully created {len(bcu)} BC object(s). Final check should pass. ---")
+
+# --- End of New Block ---
+
+# ======================================================================
+
+# The rest of your script, including the manual PETSc solver loop, remains the same.
+
+
 
 # Weak forms of governing equations
 
@@ -106,14 +159,22 @@ if facet_tags.find(args.wall_tag).size:
 F1 = (
     - inner(nabla_grad(u), nabla_grad(v)) * dx
     + p * div(v) * dx
-    - q * div(u) * dx
+    + q * div(u) * dx
     + alpha * inner(Q_n, nabla_grad(v)) * dx
 )
 
 a = fem.form(lhs(F1))
 L = fem.form(rhs(F1))
 
-problem1 = fem.petsc.LinearProblem(a, L, bcs=bcu, u=w)
+# problem1 = fem.petsc.LinearProblem(a, L, bcs=bcu, u=w)
+A = fem.petsc.assemble_matrix(a, bcs=bcu)
+A.assemble()
+b = fem.petsc.create_vector(L)
+
+solver1 = PETSc.KSP().create(domain.comm)
+solver1.setOperators(A)
+solver1.setType(PETSc.KSP.Type.GMRES)
+solver1.getPC().setType(PETSc.PC.Type.ILU)
 
 # Q-tensor evolution equation
 u_grad = nabla_grad(u_n)
@@ -123,6 +184,9 @@ n = FacetNormal(domain)
 tangent = as_vector([-n[1], n[0]])
 Qb = outer(tangent, tangent) - 0.5 * Identity(domain.geometry.dim)
 
+# import pdb
+# pdb.set_trace()
+
 F2 = (
     inner((Q_ - Q_n) / k, phi) * dx
     + inner(dot(u_n, nabla_grad(Q_)) , phi) * dx
@@ -130,7 +194,7 @@ F2 = (
     - inner(lambda_ * E, phi) * dx
     - inner(beta1 * Q_ - beta2 * inner(Q_, Q_) * Q_, phi) * dx
     + inner(nabla_grad(Q_), nabla_grad(phi)) * dx
-    + inner(EA * (Q_ - Qb), phi) * ds 
+    + inner(EA * (Q_ - Qb), phi) * sum([ds(tag) for tag in args.wall_tag], start=ds(0)) # ds(*args.wall_tag)
 )
 
 # jacobian
@@ -188,13 +252,39 @@ while t < T:
     if rank == 0:
         print(f"{time.asctime()}: t={t:.2f}", flush=True)
 
-    problem1.solve()
+    # problem1.solve()
+
+    with b.localForm() as b_loc:
+        b_loc.set(0)
+    fem.petsc.assemble_vector(b, L)
+    fem.petsc.apply_lifting(b, [a], [bcu])
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    fem.petsc.set_bc(b, bcu)
+
+    solver1.solve(b, w.x.petsc_vec)
+
+
     u_sol, p_sol = w.split()
 
     u_n.interpolate(u_sol)
     u_n.x.scatter_forward()
     p_n.interpolate(p_sol)
     p_n.x.scatter_forward()
+
+    # This code block goes inside your while loop, after u_n is updated.
+
+    # Make sure wall_dofs was successfully created earlier
+    if 'wall_dofs' in locals() and wall_dofs.size > 0:
+        
+        # Directly access the values of u_n at the boundary DoFs
+        boundary_dof_values = u_n.x.array[wall_dofs_u]
+        
+        # Check the maximum absolute value
+        max_boundary_v = np.max(np.abs(boundary_dof_values))
+        
+        # Print the result for this time step
+        if rank == 0:
+            print(f"VERIFICATION: Max velocity on boundary DoFs = {max_boundary_v:e}")
 
     # solve for Q
     n, converged = solver2.solve(Q_)
