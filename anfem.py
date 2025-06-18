@@ -22,10 +22,11 @@ from petsc4py import PETSc
 from dolfinx import fem, io, default_scalar_type
 from dolfinx.nls.petsc import NewtonSolver
 from basix.ufl import element, mixed_element
-from ufl import TestFunction, FacetNormal, Identity, div, inner, dx, ds, transpose, dot, as_vector, outer, lhs, rhs, TestFunctions, TrialFunctions, nabla_grad, derivative
+from ufl import TestFunction, FacetNormal, Identity, div, inner, dx, ds, transpose, dot, as_vector, outer, lhs, rhs, TestFunctions, TrialFunctions, nabla_grad, derivative, CellDiameter
 import numpy as np
 import time
 import argparse
+from utils import *
 
 parser = argparse.ArgumentParser(description="This script utilize the FEniCSx package to perform finite element method (FEM) to compute the evolution of the flow and the director field in an active nematic (AN) system, thus the name `anfem`.")
 
@@ -41,12 +42,14 @@ parser.add_argument("--rho_beta", type=float, default=1.6, help="parameters in L
 parser.add_argument("--ea", type=float, default=0.1, help="anchor strength")
 parser.add_argument("--wall_tag", type=int, nargs="+", default=[5], help="channel wall tag number")
 parser.add_argument("-o", "--save_dir", type=str, default="result.pvd")
+parser.add_argument("--freeslip_tag", type=int, nargs="+", default=[5], help="free-slip wall tag number")
 args = parser.parse_args()
 
 # Simulation parameters
 T = args.total_time
 dt = args.dt
 mesh_dir = args.mesh_dir
+W_TOTAL, H_TOTAL = 100, 100
 
 # Define simulation domain: load from .msh file
 domain, cell_tags, facet_tags = io.gmshio.read_from_msh(mesh_dir, MPI.COMM_WORLD, 0, gdim=2)
@@ -65,6 +68,7 @@ beta1 = fem.Constant(domain, PETSc.ScalarType(rho-1))
 beta2 = fem.Constant(domain, PETSc.ScalarType((rho+1)/rho**2))
 EA = fem.Constant(domain, PETSc.ScalarType(args.ea))
 k = fem.Constant(domain, PETSc.ScalarType(dt))
+gamma = fem.Constant(domain, PETSc.ScalarType(1.0e4)) # Penalty parameter for free-slip bc
 
 
 # Define individual elements
@@ -95,65 +99,32 @@ u_vis = fem.Function(V_vis, name="velocity")
 Q_vis = fem.Function(V_vis, name="Q")
 w = fem.Function(W)
 
-# define boundary conditions - noslip velocity
-# def walls(x):
-#     return np.logical_or(np.isclose(np.linalg.norm(x, axis=0), 5.0), np.isclose(np.linalg.norm(x, axis=0), 10.0))
+# define boundary conditions 
 
-# bcu = []
+# noslip velocity at walls
+
+bcu = []
+
+# noslip_value = fem.Function(V_u)
+# noslip_value.x.array[:] = 0
+
 # for tag in args.wall_tag:
 #     if facet_tags.find(tag).size:
 #         print(f"Detect walls tagged as {tag}")
-#         wall_dofs = fem.locate_dofs_topological(V_u, 1, facet_tags.find(tag))
-#         noslip = fem.dirichletbc(PETSc.ScalarType((0, 0)), wall_dofs, V_u)
+#         wall_dofs = fem.locate_dofs_topological((W.sub(0), V_u), 1, facet_tags.find(tag))
+#         # import pdb
+#         # pdb.set_trace()
+#         noslip_value = fem.Function(V_u)
+#         noslip = fem.dirichletbc(noslip_value, wall_dofs, W.sub(0))
 #         bcu.append(noslip)
 
-# --- New Boundary Condition Block ---
-# ======================================================================
-# --- Definitive Boundary Condition Definition ---
-print("--- Using direct subspace and fem.Function for BC definition ---")
-bcu = []
-
-# 1. Get the un-collapsed velocity subspace from the mixed space W
-
-# 2. Create a fem.Function on this subspace to hold the (0,0) value.
-#    This is the crucial step mandated by the final error message.
-noslip_value = fem.Function(V_u)
-noslip_value.x.array[:] = 0
-# Note: The default values for a new function are already zero, so we don't 
-# need to explicitly set them, but noslip_value.x.array[:] = 0 would also work.
-
-
-# 3. Your loop to find DoFs on one or more tagged boundaries.
-for tag in args.wall_tag:
-    # Locate DoFs for the velocity component DIRECTLY IN THE MIXED SPACE W
-    wall_dofs_u = fem.locate_dofs_topological(V_u, 1, facet_tags.find(tag))
-    wall_dofs = np.array([u_to_w_map[i] for i in wall_dofs_u])
-
-    if not wall_dofs.size > 0:
-        print(f"WARNING: No DoFs found for tag {tag}. Skipping.")
-        continue
-
-    print(f"SUCCESS: Found {wall_dofs.size} DoFs for tag {tag}.")
-
-    # 4. Create the BC object using the FUNCTION, not the raw value (0,0).
-    u_zero = np.array((0,) * domain.geometry.dim, dtype=default_scalar_type)
-    noslip_bc = fem.dirichletbc(noslip_value, wall_dofs) # V_u_subspace is not needed here
-    bcu.append(noslip_bc)
-
-if not bcu:
-    print("\n\n!!! CRITICAL WARNING: The boundary condition list 'bcu' is EMPTY. !!!\n\n")
-else:
-    print(f"--- Successfully created {len(bcu)} BC object(s). Final check should pass. ---")
-
-# --- End of New Block ---
-
-# ======================================================================
-
-# The rest of your script, including the manual PETSc solver loop, remains the same.
-
-
-
 # Weak forms of governing equations
+
+from ufl import Measure
+ds = Measure("ds", domain=domain, subdomain_data=facet_tags)
+
+n = FacetNormal(domain)
+h = CellDiameter(domain)
 
 # Navier-Stokes equations
 F1 = (
@@ -163,25 +134,25 @@ F1 = (
     + alpha * inner(Q_n, nabla_grad(v)) * dx
 )
 
+if args.freeslip_tag is not None:
+    F1 += (gamma / h) * inner(dot(u, n), dot(v, n)) * sum([ds(tag) for tag in args.freeslip_tag], start=ds(0)) 
+
 a = fem.form(lhs(F1))
 L = fem.form(rhs(F1))
 
-# problem1 = fem.petsc.LinearProblem(a, L, bcs=bcu, u=w)
-A = fem.petsc.assemble_matrix(a, bcs=bcu)
-A.assemble()
-b = fem.petsc.create_vector(L)
-
-solver1 = PETSc.KSP().create(domain.comm)
-solver1.setOperators(A)
-solver1.setType(PETSc.KSP.Type.GMRES)
-solver1.getPC().setType(PETSc.PC.Type.ILU)
+solver1 = fem.petsc.LinearProblem(a, L, bcs=bcu, u=w)
 
 # Q-tensor evolution equation
 u_grad = nabla_grad(u_n)
 Omega = 0.5 * (u_grad - transpose(u_grad))
 E = 0.5 * (u_grad + transpose(u_grad))
-n = FacetNormal(domain)
-tangent = as_vector([-n[1], n[0]])
+
+########################################
+# Although tangent vector theoretically should be defined as [-n[1], n[0]],
+# my test suggests that such definition would make boundary vectors perpendicular to the boundary.
+# Therefore, I make tangent = n here. The cause of this bug might be somewhere deeper in FEniCSx. 
+# I set tangent this way just to give expected behavior.
+tangent = n # as_vector([-n[1], n[0]]) # 
 Qb = outer(tangent, tangent) - 0.5 * Identity(domain.geometry.dim)
 
 # import pdb
@@ -194,7 +165,7 @@ F2 = (
     - inner(lambda_ * E, phi) * dx
     - inner(beta1 * Q_ - beta2 * inner(Q_, Q_) * Q_, phi) * dx
     + inner(nabla_grad(Q_), nabla_grad(phi)) * dx
-    + inner(EA * (Q_ - Qb), phi) * sum([ds(tag) for tag in args.wall_tag], start=ds(0)) # ds(*args.wall_tag)
+    + inner(EA * (Q_ - Qb), phi) * sum([ds(tag) for tag in args.wall_tag], start=ds(0)) 
 )
 
 # jacobian
@@ -205,37 +176,7 @@ solver2 = NewtonSolver(domain.comm, problem)
 
 # Set initial states
 
-# 0-flow
-u_n.x.array[:] = 0.0
-
-# 0-pressure
-p_n.x.array[:] = 0.0
-
-# random initial Q-tensor
-# Get the mesh coordinates
-x = domain.geometry.x  # shape (n_points, 2)
-d = np.random.rand(x.shape[0], 2)
-d /= np.linalg.norm(d, axis=1)[:, None]  # Normalize d
-
-# Compute the Q-tensor: Q = S*(d⊗d - I/2)
-Q_vals = np.einsum("ni,nj->nij", d, d) - 0.5 * np.eye(2)
-
-# Reshape Q_vals to match the flattened dolfinx Function vector and set Q_n
-Q_n.x.array[:] = Q_vals.flatten()
-
-# Q-tensor to director for visualization
-def Q2D(Q_tensor):
-    Q_e = Q_tensor.x.array.reshape(-1, 2, 2)
-    num_pts = Q_e.shape[0]
-    d_vals = np.zeros((num_pts, 2))
-
-    for i in range(num_pts):
-        # Get eigenvector with max eigenvalue
-        vals, vecs = np.linalg.eigh(Q_e[i])
-        d = vecs[:, np.argmax(vals)]
-
-        d_vals[i, :] = d
-    return d_vals
+Q_n.x.array[:] = initialize_Q(domain)
 
 t = 0
 
@@ -252,42 +193,35 @@ while t < T:
     if rank == 0:
         print(f"{time.asctime()}: t={t:.2f}", flush=True)
 
-    # problem1.solve()
-
-    with b.localForm() as b_loc:
-        b_loc.set(0)
-    fem.petsc.assemble_vector(b, L)
-    fem.petsc.apply_lifting(b, [a], [bcu])
-    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
-    fem.petsc.set_bc(b, bcu)
-
-    solver1.solve(b, w.x.petsc_vec)
-
+    solver1.solve()
 
     u_sol, p_sol = w.split()
 
     u_n.interpolate(u_sol)
+    # u_n.x.array[:] = apply_periodic_bc(u_n)
     u_n.x.scatter_forward()
     p_n.interpolate(p_sol)
+    # p_n.x.array[:] = apply_periodic_bc(p_n)
     p_n.x.scatter_forward()
 
     # This code block goes inside your while loop, after u_n is updated.
 
     # Make sure wall_dofs was successfully created earlier
-    if 'wall_dofs' in locals() and wall_dofs.size > 0:
+    # if 'wall_dofs' in locals() and wall_dofs[1].size > 0:
         
-        # Directly access the values of u_n at the boundary DoFs
-        boundary_dof_values = u_n.x.array[wall_dofs_u]
+    #     # Directly access the values of u_n at the boundary DoFs
+    #     boundary_dof_values = u_n.x.array[wall_dofs[1]]
         
-        # Check the maximum absolute value
-        max_boundary_v = np.max(np.abs(boundary_dof_values))
+    #     # Check the maximum absolute value
+    #     max_boundary_v = np.max(np.abs(boundary_dof_values))
         
-        # Print the result for this time step
-        if rank == 0:
-            print(f"VERIFICATION: Max velocity on boundary DoFs = {max_boundary_v:e}")
+    #     # Print the result for this time step
+    #     if rank == 0:
+    #         print(f"VERIFICATION: Max velocity on boundary DoFs = {max_boundary_v:e}")
 
     # solve for Q
     n, converged = solver2.solve(Q_)
     Q_n.interpolate(Q_)
+    # Q_n.x.array[:] = apply_periodic_bc(Q_n)
     Q_n.x.scatter_forward()
 
