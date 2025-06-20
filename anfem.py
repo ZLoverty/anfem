@@ -133,7 +133,7 @@ if args.noslip:
             noslip = fem.dirichletbc(noslip_value, wall_dofs, W.sub(0))
             bcu.append(noslip)
 else:
-    print(f"Create noslip boundary at {args.wall_tags}")
+    print(f"Create freeslip boundary at {args.wall_tags}")
     F1 += (gamma / h) * inner(dot(u, n), dot(v, n)) * sum([ds(tag) for tag in args.wall_tags], start=ds(0)) 
 
 a = fem.form(lhs(F1))
