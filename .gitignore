@@ -204,3 +204,6 @@ __marimo__/
 *.msh
 *.geo
 *.pvd/
+
+# temp file
+tmp

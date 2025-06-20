@@ -5,7 +5,7 @@ test_time_step.py
 This script tests the time step of the velocity field of the result of `anfem.py` in a simple square domain, using different activity parameters dt (0.01, 0.02, 0.04, 0.08).
 """
 
-from subprocess import run
+from subprocess import Popen
 from pathlib import Path
 
 save_folder = "~/Documents/RATSIM/time_step"
@@ -20,6 +20,7 @@ for i in range(4):
     cmd = [
         "python", "anfem.py", "square_50.msh",
         "--dt", str(dt),
-        "-o", save_dir
+        "--noslip",
+        "-o", save_dir,
     ]
-    run(cmd)
+    Popen(cmd)

@@ -2,8 +2,13 @@ import numpy as np
 from dolfinx import geometry, fem
 
 # Q-tensor to director for visualization
-def Q2D(Q_tensor):
+def Q2D(Q_tensor: fem.Function) -> np.array:
     """Convert Q-tensor to director.
+    Args:
+    Q_tensor -- dolfinx Function object.
+
+    Returns:
+    d_vals -- director vector fields.
     """
     Q_e = Q_tensor.x.array.reshape(-1, 2, 2)
     num_pts = Q_e.shape[0]
@@ -30,7 +35,23 @@ def initialize_Q(domain):
     # Reshape Q_vals to match the flattened dolfinx Function vector and set Q_n
     return Q_vals.flatten()
 
+def compute_average_mesh_size(domain):
+    """Compute the average mesh size."""
+    domain.topology.create_connectivity(1, 0)  # edges to vertices
+    edges = domain.topology.connectivity(1, 0).array.reshape(-1, 2)
+    edge_coords = domain.geometry.x[edges]
+    edge_lengths = np.linalg.norm(edge_coords[:, 0, :] - edge_coords[:, 1, :], axis=1)
+    return np.mean(edge_lengths)
+
 def apply_periodic_bc(function: fem.Function):
+    """This function helps to implement periodic boundary condition by setting values at top and right boundaries with the values at bottom and left boundaries.
+    
+    To apply, use
+    
+    ```
+    u_n.x.array[:] = apply_periodic_bc(u_n)
+    ```
+    """
 
     function_space = function.function_space
     domain = function_space.mesh

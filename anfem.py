@@ -15,6 +15,11 @@ python anfem.py mesh_dir -t T --dt DT --alpha ALPHA --lambda LAMBDA --rho_beta R
 * --lambda_: flow alignment parameter
 * --rho_beta: parameters in LDG free energy functional, determines whether the system would favor nematic alignment (rho>1) or isotropic (rho<1).
 * --ea: anchor strength
+
+Edit
+----
+* Jun 15, 2025: Initial commit.
+* Jun 20, 2025: Write log to file. 
 """
 
 from mpi4py import MPI
@@ -22,7 +27,7 @@ from petsc4py import PETSc
 from dolfinx import fem, io, default_scalar_type
 from dolfinx.nls.petsc import NewtonSolver
 from basix.ufl import element, mixed_element
-from ufl import TestFunction, FacetNormal, Identity, div, inner, dx, ds, transpose, dot, as_vector, outer, lhs, rhs, TestFunctions, TrialFunctions, nabla_grad, derivative, CellDiameter
+from ufl import TestFunction, FacetNormal, Identity, div, inner, dx, ds, transpose, dot, as_vector, outer, lhs, rhs, TestFunctions, TrialFunctions, nabla_grad, derivative, CellDiameter, Measure
 import numpy as np
 import time
 import argparse
@@ -41,7 +46,7 @@ parser.add_argument("--lambda_", type=float, default=0.7, help="Flow alignment p
 parser.add_argument("--rho_beta", type=float, default=1.6, help="parameters in LDG free energy functional, determines whether the system would favor nematic alignment (rho>1) or isotropic (rho<1).")
 parser.add_argument("--ea", type=float, default=0.1, help="anchor strength")
 parser.add_argument("--wall_tags", type=int, nargs="+", default=[1], help="channel wall tag number")
-parser.add_argument("-o", "--save_dir", type=str, default="result.pvd")
+parser.add_argument("-o", "--save_dir", type=str, default=".")
 parser.add_argument("--noslip", help="Enable noslip boundary condition on all boundaries with tag in wall_tags", action='store_true')
 args = parser.parse_args()
 
@@ -55,15 +60,12 @@ save_dir = Path(args.save_dir).expanduser().resolve()
 # file operations
 save_dir.mkdir(exist_ok=True)
 shutil.copy(mesh_dir, save_dir / "mesh.msh")
+log_dir = save_dir / "log"
+log = open(log_dir, "w")
 
 # Define simulation domain: load from .msh file
 domain, cell_tags, facet_tags = io.gmshio.read_from_msh(mesh_dir, MPI.COMM_WORLD, 0, gdim=2)
-
-all_tags = np.unique(facet_tags.values)
-print("----------------------------------------------------------")
-print(f"All unique facet tags found in mesh: {all_tags}")
-print("Please ensure the --wall_tag you provide is in this list.")
-print("----------------------------------------------------------")
+ds = Measure("ds", domain=domain, subdomain_data=facet_tags) # make ds recognize the tags, otherwise boundary condition does not take effect
 
 # Define constants
 alpha = fem.Constant(domain, PETSc.ScalarType(args.alpha))
@@ -74,6 +76,9 @@ beta2 = fem.Constant(domain, PETSc.ScalarType((rho+1)/rho**2))
 EA = fem.Constant(domain, PETSc.ScalarType(args.ea))
 k = fem.Constant(domain, PETSc.ScalarType(dt))
 gamma = fem.Constant(domain, PETSc.ScalarType(1.0e4)) # Penalty parameter for free-slip bc
+
+# compute average edge length
+avg_h = compute_average_mesh_size(domain)
 
 # Define individual elements
 u_el = element("Lagrange", domain.topology.cell_name(), 2, shape=(2,))
@@ -103,13 +108,10 @@ u_vis = fem.Function(V_vis, name="velocity")
 Q_vis = fem.Function(V_vis, name="Q")
 w = fem.Function(W)
 
+
+# handle boundary conditions
+
 # Weak forms of governing equations
-
-from ufl import Measure
-ds = Measure("ds", domain=domain, subdomain_data=facet_tags)
-
-n = FacetNormal(domain)
-h = CellDiameter(domain)
 
 # Navier-Stokes equations
 F1 = (
@@ -119,21 +121,22 @@ F1 = (
     + alpha * inner(Q_n, nabla_grad(v)) * dx
 )
 
-# handle boundary conditions
+n = FacetNormal(domain)
 
 bcu = []
 if args.noslip:
+    print(f"Create NO-SLIP boundary at {args.wall_tags}", file=log)
     noslip_value = fem.Function(V_u)
     noslip_value.x.array[:] = 0
     for tag in wall_tags:
         if facet_tags.find(tag).size:
-            print(f"Create noslip boundary at {tag}")
             wall_dofs = fem.locate_dofs_topological((W.sub(0), V_u), 1, facet_tags.find(tag))
             noslip_value = fem.Function(V_u)
             noslip = fem.dirichletbc(noslip_value, wall_dofs, W.sub(0))
             bcu.append(noslip)
 else:
-    print(f"Create freeslip boundary at {args.wall_tags}")
+    print(f"Create FREE-SLIP boundary at {args.wall_tags}", file=log)
+    h = CellDiameter(domain)
     F1 += (gamma / h) * inner(dot(u, n), dot(v, n)) * sum([ds(tag) for tag in args.wall_tags], start=ds(0)) 
 
 a = fem.form(lhs(F1))
@@ -153,9 +156,6 @@ E = 0.5 * (u_grad + transpose(u_grad))
 # I set tangent this way just to give expected behavior.
 tangent = n # as_vector([-n[1], n[0]]) # 
 Qb = outer(tangent, tangent) - 0.5 * Identity(domain.geometry.dim)
-
-# import pdb
-# pdb.set_trace()
 
 F2 = (
     inner((Q_ - Q_n) / k, phi) * dx
@@ -189,9 +189,9 @@ params = {
     "save_dir": str(save_dir)
 }
 
-print("Simulation parameters:")
+print("Simulation parameters:", file=log)
 for k, v in params.items():
-    print(f"{k}: {v}")
+    print(f"{k}: {v}", file=log)
 
 with open(save_dir / "params.json", 'w') as json_file:
     json.dump(params, json_file, indent=4)
@@ -203,28 +203,36 @@ writer = io.VTXWriter(domain.comm, save_dir / "results.pvd", output=[p_n, u_vis,
 
 rank = MPI.COMM_WORLD.Get_rank()
 
-while t < T:
-    u_vis.interpolate(u_n)
-    Q_vis.x.array[:] = Q2D(Q_n).flatten()
-    writer.write(t)
+try:
+    while t < T:
+        u_vis.interpolate(u_n)
+        Q_vis.x.array[:] = Q2D(Q_n).flatten()
+        writer.write(t)
 
-    t += dt
-    if rank == 0:
-        print(f"{time.asctime()}: t={t:.2f}", flush=True)
+        # compute Courant number
+        vmax = np.linalg.norm(u_vis.x.array.reshape(-1, 2), axis=1).max()
+        Cr = vmax * dt / avg_h
 
-    solver1.solve()
+        t += dt
+        if rank == 0:
+            print(f"{time.asctime()}: t={t:.2f}, Cr={Cr:.2f}", flush=True, file=log)
 
-    u_sol, p_sol = w.split()
+        solver1.solve()
 
-    u_n.interpolate(u_sol)
-    # u_n.x.array[:] = apply_periodic_bc(u_n)
-    u_n.x.scatter_forward()
-    p_n.interpolate(p_sol)
-    # p_n.x.array[:] = apply_periodic_bc(p_n)
-    p_n.x.scatter_forward()
+        u_sol, p_sol = w.split()
 
-    # solve for Q
-    n, converged = solver2.solve(Q_)
-    Q_n.interpolate(Q_)
-    # Q_n.x.array[:] = apply_periodic_bc(Q_n)
-    Q_n.x.scatter_forward()
+        u_n.interpolate(u_sol)
+        # u_n.x.array[:] = apply_periodic_bc(u_n)
+        u_n.x.scatter_forward()
+        p_n.interpolate(p_sol)
+        # p_n.x.array[:] = apply_periodic_bc(p_n)
+        p_n.x.scatter_forward()
+
+        # solve for Q
+        n, converged = solver2.solve(Q_)
+        Q_n.interpolate(Q_)
+        # Q_n.x.array[:] = apply_periodic_bc(Q_n)
+        Q_n.x.scatter_forward()
+        
+finally:
+    log.close()
