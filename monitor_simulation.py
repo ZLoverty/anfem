@@ -4,9 +4,9 @@ import glob
 import time
 from pathlib import Path
 
-STATUS_DIR = "~/Document/RATSIM"
+STATUS_DIR = "~/Documents/RATSIM"
 STATUS_DIR = Path(STATUS_DIR).expanduser().resolve()
-REFRESH_INTERVAL = 1 # seconds (how often the display updates)
+REFRESH_INTERVAL = 5 # seconds (how often the display updates)
 BAR_LENGTH = 30    # Length of the progress bar itself
 
 def clear_terminal():
@@ -29,9 +29,8 @@ def display_simulation_status():
     print("--- Simulation Progress Dashboard ---")
     print("-" * (BAR_LENGTH + 40)) # Adjust header length
 
-    status_files = glob.glob(os.path.join(STATUS_DIR, "**log"), recursive=True)
-    import pdb
-    pdb.set_trace()
+    status_files = glob.glob(str(STATUS_DIR / "**" / "log"), recursive=True)
+
     if not status_files:
         print("No simulation status files found yet.")
         print("Waiting for simulations to start...")
@@ -43,12 +42,13 @@ def display_simulation_status():
 
     active_sims = 0
     for status_file in status_files:
-        sim_id = os.path.basename(status_file).replace("status_", "").replace(".txt", "")
+        status_file = Path(status_file)
+        sim_id = str(status_file.parent).replace(str(STATUS_DIR), "")
         
         try:
             # Read the entire content to get the last update, or just the first line if single line
             with open(status_file, 'r') as f:
-                status_line = f.read().strip() # Read the whole (single) line
+                status_line = f.readlines()[-1].strip() # Read the whole (single) line
             
             current_step = 0
             total_steps = 0
@@ -60,13 +60,14 @@ def display_simulation_status():
                     parts = status_line.split(":")[1].strip().split('/')
                     current_step = int(parts[0])
                     total_steps = int(parts[1])
-                    status_message = "Running"
+                    status_message = f"Running {current_step}/{total_steps}"
                     progress_bar_str = get_progress_bar(current_step, total_steps)
                     active_sims += 1
                 except (IndexError, ValueError):
                     status_message = f"Invalid PROGRESS format: {status_line[:20]}..."
             elif status_line.startswith("COMPLETED:"):
-                status_message = status_line
+                parts = status_line.split(":")[2].split(',')[1].split("=")[1]
+                status_message = f"Completed in {parts}"
                 progress_bar_str = get_progress_bar(100, 100) # Full bar
             elif status_line.startswith("ERROR:"):
                 status_message = status_line
@@ -78,14 +79,14 @@ def display_simulation_status():
                 status_message = status_line
                 progress_bar_str = "Exited Early!"
             else:
-                status_message = f"Unknown Status: {status_line[:20]}..."
+                status_message = f"{status_line[:20]}"
 
-            print(f"{sim_id: <15} {progress_bar_str}  {status_message}")
+            print(f"{sim_id: <30} {progress_bar_str}  {status_message}")
 
         except FileNotFoundError:
-            print(f"{sim_id: <15} [ File missing ] May have just completed or crashed.")
+            print(f"{sim_id: <30} [ File missing ] May have just completed or crashed.")
         except Exception as e:
-            print(f"{sim_id: <15} [ Read Error ] {e}")
+            print(f"{sim_id: <30} [ Read Error ] {e}")
     
     print("-" * (BAR_LENGTH + 40))
     print(f"Simulations Running: {active_sims}. Last updated: {time.strftime('%H:%M:%S')}. Press Ctrl+C to exit.")

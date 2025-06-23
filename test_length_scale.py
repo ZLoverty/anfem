@@ -17,7 +17,7 @@ for i in range(6):
     alpha = 2 ** i
     pvd_file = save_folder / f"alpha={alpha:d}"
     cmd = [
-        "python", "anfem.py", "square_50.msh",
+        "python", "anfem.py", "mesh.msh",
         "--alpha", str(alpha),
         "--noslip",
         "-o", pvd_file

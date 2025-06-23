@@ -9,7 +9,7 @@ Syntax
 
 python anfem.py mesh_dir -t T --dt DT --alpha ALPHA --lambda LAMBDA --rho_beta RHO_BETA --ea EA
 
-* -t: total simulation time (second)
+* -T: total simulation time (second)
 * -dt: step time (second)
 * --alpha: dimensionless activity 
 * --lambda_: flow alignment parameter
@@ -39,7 +39,7 @@ import shutil
 # Arguments
 parser = argparse.ArgumentParser(description="This script utilize the FEniCSx package to perform finite element method (FEM) to compute the evolution of the flow and the director field in an active nematic (AN) system, thus the name `anfem`.")
 parser.add_argument("mesh_dir", type=str, help="Input mesh.")
-parser.add_argument("-t", "--total_time", type=float, default=10, help="Total simulation time in seconds.")
+parser.add_argument("-T", "--total_time", type=float, default=10, help="Total simulation time in seconds.")
 parser.add_argument("--dt", type=float, default=0.1, help="Step size in seconds.")
 parser.add_argument("--alpha", type=float, default=5, help="Dimensionless activity parameter.")
 parser.add_argument("--lambda_", type=float, default=0.7, help="Flow alignment parameter.")
@@ -58,7 +58,11 @@ wall_tags = args.wall_tags
 save_dir = Path(args.save_dir).expanduser().resolve()
 
 # file operations
-save_dir.mkdir(exist_ok=True)
+try:
+    save_dir.mkdir(parents=True)
+except Exception as e:
+    print(f"An error occured: {e}")
+    exit()
 shutil.copy(mesh_dir, save_dir / "mesh.msh")
 log_dir = save_dir / "log"
 log = open(log_dir, "w")
@@ -66,6 +70,7 @@ log = open(log_dir, "w")
 # Define simulation domain: load from .msh file
 domain, cell_tags, facet_tags = io.gmshio.read_from_msh(mesh_dir, MPI.COMM_WORLD, 0, gdim=2)
 ds = Measure("ds", domain=domain, subdomain_data=facet_tags) # make ds recognize the tags, otherwise boundary condition does not take effect
+print(f"All facet_tags: {np.unique(facet_tags.values)}")
 
 # Define constants
 alpha = fem.Constant(domain, PETSc.ScalarType(args.alpha))
@@ -83,13 +88,15 @@ avg_h = compute_average_mesh_size(domain)
 # Define individual elements
 u_el = element("Lagrange", domain.topology.cell_name(), 2, shape=(2,))
 p_el = element("Lagrange", domain.topology.cell_name(), 1, shape=())
-Q_el = element("Lagrange", domain.topology.cell_name(), 1, shape=(2, 2))
+Q1_el = element("Lagrange", domain.topology.cell_name(), 1, shape=(2, 2))
+Q_el = element("Lagrange", domain.topology.cell_name(), 2, shape=(2, 2))
 vis_el = element("Lagrange", domain.topology.cell_name(), 1, shape=(2,))
 w_el = mixed_element([u_el, p_el])
 
 # Define function spaces
 W = fem.functionspace(domain, w_el)
 V_Q = fem.functionspace(domain, Q_el)
+V_Q1 = fem.functionspace(domain, Q1_el)
 V_vis = fem.functionspace(domain, vis_el)
 V_u, u_to_w_map = W.sub(0).collapse()
 V_p, _ = W.sub(1).collapse()
@@ -107,6 +114,7 @@ Q_n = fem.Function(V_Q)
 u_vis = fem.Function(V_vis, name="velocity")
 Q_vis = fem.Function(V_vis, name="Q")
 w = fem.Function(W)
+S = fem.Function(V_p, name="scalar order")
 
 
 # handle boundary conditions
@@ -175,7 +183,9 @@ solver2 = NewtonSolver(domain.comm, problem)
 
 # Set initial states
 
-Q_n.x.array[:] = initialize_Q(domain)
+Q_1 = fem.Function(V_Q1)
+Q_1.x.array[:] = initialize_Q(domain)
+Q_n.interpolate(Q_1)
 
 # write simulation parameters
 
@@ -197,25 +207,34 @@ with open(save_dir / "params.json", 'w') as json_file:
     json.dump(params, json_file, indent=4)
 
 # ========= Begin the simulation ! ================
+print(f"Simulation starts at {time.asctime()}!")
+t0 = time.time()
 t = 0
-
-writer = io.VTXWriter(domain.comm, save_dir / "results.pvd", output=[p_n, u_vis, Q_vis]) 
-
+i = 0
+writer = io.VTXWriter(domain.comm, save_dir / "results.pvd", output=[p_n, u_vis, Q_vis, S]) 
+step_total = int(T/dt)
 rank = MPI.COMM_WORLD.Get_rank()
 
 try:
-    while t < T:
+    for i in range(step_total):
         u_vis.interpolate(u_n)
-        Q_vis.x.array[:] = Q2D(Q_n).flatten()
+        # import pdb
+        # pdb.set_trace()
+        Q_1.interpolate(Q_n)
+        Q_vals, Sv = Q2D(Q_1)
+        Q_vis.x.array[:] = Q_vals.flatten()
+        S.x.array[:] = Sv.flatten()
         writer.write(t)
 
+        # update time
+
+        t = i * dt
         # compute Courant number
         vmax = np.linalg.norm(u_vis.x.array.reshape(-1, 2), axis=1).max()
         Cr = vmax * dt / avg_h
 
-        t += dt
         if rank == 0:
-            print(f"{time.asctime()}: t={t:.2f}, Cr={Cr:.2f}", flush=True, file=log)
+            print(f"PROGRESS: {i:d}/{step_total:d} : Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s", flush=True, file=log)
 
         solver1.solve()
 
@@ -233,6 +252,10 @@ try:
         Q_n.interpolate(Q_)
         # Q_n.x.array[:] = apply_periodic_bc(Q_n)
         Q_n.x.scatter_forward()
-        
+    print(f"COMPLETED: {i:d}/{step_total:d} : Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s", flush=True, file=log)
+except Exception as e:
+    print(f"An error occurred: {e}")
+    print(f"EXIT EARLY: {i:d}/{step_total:d} : Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s", flush=True, file=log)
+    
 finally:
     log.close()

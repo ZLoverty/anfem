@@ -1,18 +1,19 @@
 import gmsh
 import argparse
 import os
+from pathlib import Path
 
 parser = argparse.ArgumentParser(description="This script draws the mesh of ratchet channels with different dimensions and number of ratchets.")
-parser.add_argument("-H", type=int, default=5, help="Ratchet height.")
-parser.add_argument("-l", type=int, default=None, help="Ratchet length.")
-parser.add_argument("-m", type=int, default=None, help="Ratchet channel padding.")
+parser.add_argument("-H", type=float, default=5, help="Ratchet height.")
 parser.add_argument("-N", type=int, default=3, help="Number of rathets.")
-parser.add_argument("-w", type=int, default=None, help="Channel width -- the distance between ratchet tips.")
-parser.add_argument("--cl_outer", type=int, default=3, help="Characeteristic length of outer boundary.")
-parser.add_argument("--cl_inner", type=int, default=1, help="Characteristic length of inner boundary.")
+parser.add_argument("-l", type=float, default=None, help="Ratchet length.")
+parser.add_argument("-m", type=float, default=None, help="Ratchet channel padding.")
+parser.add_argument("-w", type=float, default=None, help="Channel width -- the distance between ratchet tips.")
+parser.add_argument("--cl_outer", type=float, default=3, help="Characeteristic length of outer boundary.")
+parser.add_argument("--cl_inner", type=float, default=1, help="Characteristic length of inner boundary.")
 parser.add_argument("--w_total", type=int, default=200, help="Total width of the pool.")
 parser.add_argument("--h_total", type=int, default=100, help="Total height of the pool.")
-parser.add_argument("-o", type=str, default=".", help="Output dir of the .msh file.")
+parser.add_argument("-o", type=str, default="mesh.msh", help="Output dir of the .msh file.")
 args = parser.parse_args()
 
 # Initialize Gmsh
@@ -33,8 +34,12 @@ w = 2 * h if args.w is None else args.w
 N = args.N
 cl_outer = args.cl_outer  # Outer boundary characteristic length
 cl_inner = args.cl_inner   # Channel characteristic length
-save_dir = os.path.abspath(args.o)
-os.makedirs(save_dir, exist_ok=True)
+save_dir = Path(args.o).expanduser().resolve()
+if save_dir.exists():
+    print(f"Mesh {save_dir} already exists, abort ...")
+    exit()
+if save_dir.parent.exists() == False:
+    save_dir.parent.mkdir(parents=True)
 
 # check length compatibility
 assert(H_TOTAL > 4*h + w)
@@ -130,6 +135,6 @@ gmsh.model.addPhysicalGroup(1, boundary_curves_tags, 1, "boundary")
 occ.synchronize()
 
 gmsh.model.mesh.generate(2)
-gmsh.write(os.path.join(save_dir, "mesh.msh"))
+gmsh.write(os.path.join(save_dir))
 
 gmsh.finalize()
