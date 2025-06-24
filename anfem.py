@@ -5,7 +5,6 @@ import json
 import shutil
 import time
 from pathlib import Path
-
 import numpy as np
 from dolfinx import fem, io, default_scalar_type
 from dolfinx.nls.petsc import NewtonSolver
@@ -17,7 +16,6 @@ from ufl import (
     transpose, dot, as_vector, outer, lhs, rhs,
     TestFunctions, TrialFunctions, nabla_grad, derivative, CellDiameter, Measure
 )
-
 from utils import compute_average_mesh_size, Q2D, initialize_Q
 import logging
 
@@ -28,19 +26,21 @@ logger = logging.getLogger(__name__)
 
 class ActiveNematicSimulator:
     """
-    Simulates the evolution of flow and director field in an active nematic system
-    using FEniCSx.
+    Simulates the evolution of flow and director field in an active nematic system using FEniCSx.
     """
     def __init__(self, args):
-        self.comm = MPI.COMM_WORLD
-        self.rank = self.comm.Get_rank()
-        self.args = args
-        self._force = args.f
-        self.save_dir = Path(args.save_dir).expanduser().resolve()
+        """
+        args -- a dictionary of arguments.
+        """
+        self.setup_args(args)
+        self.save_dir = Path(self.args["save_dir"]).expanduser().resolve()
+        self.mesh_dir = Path(self.args["mesh_dir"]).expanduser().resolve()
         self.setup_directories()
         self.log_file_path = self.save_dir / "anfem.log"
         self._configure_file_logging()
 
+        self.comm = MPI.COMM_WORLD
+        self.rank = self.comm.Get_rank()
         self.domain, self.cell_tags, self.facet_tags = self._load_mesh()
         self.ds = Measure("ds", domain=self.domain, subdomain_data=self.facet_tags)
 
@@ -62,13 +62,33 @@ class ActiveNematicSimulator:
     def setup_directories(self):
         """Creates the save directory and copies the mesh file."""
 
-        if self.save_dir.exists() and not self._force:
+        if self.save_dir.exists() and not self.args["f"]:
             print(f"Simulation {self.save_dir} already exists, abort ...")
             exit()
         else:
             self.save_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(self.args.mesh_dir, self.save_dir / "mesh.msh")
+            shutil.copy(self.mesh_dir, self.save_dir / "mesh.msh")
      
+    def setup_args(self, args):
+        """overwrite the default values with provided args."""
+
+        self.args = {
+            "mesh_dir": "mesh.msh",
+            "total_time": 10,
+            "dt": 0.1,
+            "alpha": 5,
+            "lambda_": 0.7,
+            "rho_beta": 1.6,
+            "ea": 0.1,
+            "wall_tags": [1],
+            "save_dir": ".",
+            "noslip": True,
+            "f": False
+        }
+        
+        for key in args:
+            if key in self.args:
+                self.args[key] = args[key]
 
     def _configure_file_logging(self):
         """Adds a file handler to the logger."""
@@ -78,21 +98,21 @@ class ActiveNematicSimulator:
 
     def _load_mesh(self):
         """Loads the mesh from the specified directory."""
-        logger.info(f"Loading mesh from {self.args.mesh_dir}")
-        domain, cell_tags, facet_tags = io.gmshio.read_from_msh(self.args.mesh_dir, self.comm, 0, gdim=2)
+        logger.info(f"Loading mesh from {self.mesh_dir}")
+        domain, cell_tags, facet_tags = io.gmshio.read_from_msh(self.mesh_dir, self.comm, 0, gdim=2)
         logger.info(f"All facet_tags: {np.unique(facet_tags.values)}")
         return domain, cell_tags, facet_tags
 
     def _define_constants(self):
         """Defines and returns simulation constants."""
         constants = {
-            "alpha": fem.Constant(self.domain, PETSc.ScalarType(self.args.alpha)),
-            "lambda_": fem.Constant(self.domain, PETSc.ScalarType(self.args.lambda_)),
-            "rho": self.args.rho_beta,
-            "beta1": fem.Constant(self.domain, PETSc.ScalarType(self.args.rho_beta - 1)),
-            "beta2": fem.Constant(self.domain, PETSc.ScalarType((self.args.rho_beta + 1) / self.args.rho_beta**2)),
-            "EA": fem.Constant(self.domain, PETSc.ScalarType(self.args.ea)),
-            "k": fem.Constant(self.domain, PETSc.ScalarType(self.args.dt)),
+            "alpha": fem.Constant(self.domain, PETSc.ScalarType(self.args["alpha"])),
+            "lambda_": fem.Constant(self.domain, PETSc.ScalarType(self.args["lambda_"])),
+            "rho": self.args['rho_beta'],
+            "beta1": fem.Constant(self.domain, PETSc.ScalarType(self.args["rho_beta"] - 1)),
+            "beta2": fem.Constant(self.domain, PETSc.ScalarType((self.args["rho_beta"] + 1) / self.args["rho_beta"]**2)),
+            "EA": fem.Constant(self.domain, PETSc.ScalarType(self.args["ea"])),
+            "k": fem.Constant(self.domain, PETSc.ScalarType(self.args["dt"])),
             "gamma": fem.Constant(self.domain, PETSc.ScalarType(1.0e4)), # Penalty parameter for free-slip bc
         }
         return constants
@@ -159,11 +179,11 @@ class ActiveNematicSimulator:
         )
 
         bcs_u = []
-        if self.args.noslip:
-            logger.info(f"Applying NO-SLIP boundary condition at facets with tags: {self.args.wall_tags}")
+        if self.args["noslip"]:
+            logger.info("Applying NO-SLIP boundary condition at facets with tags: {}".format(self.args["wall_tags"]))
             noslip_value = fem.Function(self.function_spaces["V_u"])
             noslip_value.x.array[:] = 0
-            for tag in self.args.wall_tags:
+            for tag in self.args["wall_tags"]:
                 # Check if the tag actually exists in the mesh
                 if self.facet_tags.find(tag).size > 0:
                     wall_dofs = fem.locate_dofs_topological(
@@ -173,9 +193,9 @@ class ActiveNematicSimulator:
                 else:
                     logger.warning(f"Wall tag {tag} not found in mesh. Skipping no-slip BC for this tag.")
         else:
-            logger.info(f"Applying FREE-SLIP boundary condition at facets with tags: {self.args.wall_tags}")
+            logger.info("Applying FREE-SLIP boundary condition at facets with tags: {}".format(self.args["wall_tags"]))
             # Sum ds measures only for specified wall tags, handling potential empty list
-            wall_measures = sum([self.ds(tag) for tag in self.args.wall_tags], start=self.ds(0))
+            wall_measures = sum([self.ds(tag) for tag in self.args["wall_tags"]], start=self.ds(0))
             if wall_measures: # Only add if there are actual wall measures
                 F1 += (gamma / h) * inner(dot(u, n), dot(v, n)) * wall_measures
 
@@ -198,10 +218,7 @@ class ActiveNematicSimulator:
         EA = self.constants["EA"]
 
         n = FacetNormal(self.domain)
-        # Revisit the tangent definition if previous tests were misleading
-        # For now, sticking to n based on the comment in the original code,
-        # but for true tangent, it should be something like as_vector([-n[1], n[0]]) for 2D.
-        tangent = n
+        tangent = as_vector([-n[1], n[0]])
         Qb = outer(tangent, tangent) - 0.5 * Identity(self.domain.geometry.dim)
 
         u_grad = nabla_grad(u_n)
@@ -217,7 +234,7 @@ class ActiveNematicSimulator:
         bulk_free_energy_term = - inner(beta1 * Q_ - beta2 * inner(Q_, Q_) * Q_, phi) * dx
 
         # Surface anchoring term
-        wall_measures = sum((self.ds(tag) for tag in self.args.wall_tags), start=self.ds(0))
+        wall_measures = sum((self.ds(tag) for tag in self.args["wall_tags"]), start=self.ds(0))
         surface_anchoring_term = inner(EA * (Q_ - Qb), phi) * wall_measures if wall_measures else 0
 
         F2 = (
@@ -249,11 +266,11 @@ class ActiveNematicSimulator:
             "lambda": float(self.constants["lambda_"]),
             "rho_beta": self.constants["rho"],
             "EA": float(self.constants["EA"]),
-            "total_time": self.args.total_time,
-            "dt": self.args.dt,
+            "total_time": self.args["total_time"],
+            "dt": self.args["dt"],
             "save_dir": str(self.save_dir),
-            "wall_tags": self.args.wall_tags,
-            "noslip_bc": self.args.noslip,
+            "wall_tags": self.args["wall_tags"],
+            "noslip_bc": self.args["noslip"],
         }
         with open(self.save_dir / "params.json", 'w') as json_file:
             json.dump(params, json_file, indent=4)
@@ -264,7 +281,7 @@ class ActiveNematicSimulator:
         logger.info(f"Simulation starts at {time.asctime()}!")
         t0 = time.time()
         t = 0.0
-        step_total = int(self.args.total_time / self.args.dt)
+        step_total = int(self.args["total_time"] / self.args["dt"])
 
         try:
             for i in range(step_total):
@@ -273,24 +290,21 @@ class ActiveNematicSimulator:
                 self.functions["Q1"].interpolate(self.functions["Q_n"]) # Interpolate Q_n to Q1
                 Q_vals, Sv = Q2D(self.functions["Q1"])
                 self.functions["Q_vis"].x.array[:] = Q_vals.flatten()
-                self.functions["S"].x.array[:] = Sv.flatten()
-                
-                # Compute scalar order parameter and director field from Q_n for visualization
-
+                self.functions["S"].x.array[:] = Sv.flatten()                
                 self.writer.write(t)
 
-                t = (i + 1) * self.args.dt # Update time for next step
+                t = (i + 1) * self.args["dt"] # Update time for next step
 
                 # Compute Courant number
                 u_array = self.functions["u_vis"].x.array
                 if u_array.size > 0:
                     vmax = np.linalg.norm(u_array.reshape(-1, 2), axis=1).max()
-                    Cr = vmax * self.args.dt / self.avg_h
+                    Cr = vmax * self.args["dt"] / self.avg_h
                 else:
                     Cr = 0.0 # Handle case with no velocity data
 
                 if self.rank == 0:
-                    logger.info(f"PROGRESS: {i+1}/{step_total} : Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s")
+                    logger.info(f"{i+1}/{step_total}, Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s")
 
                 # Solve Navier-Stokes equations
                 self.solver_ns.solve()
@@ -335,7 +349,7 @@ def main():
     parser.add_argument("-f", action="store_true", help="Force create the mesh. Overwrite if the file already exists.")
     args = parser.parse_args()
 
-    simulator = ActiveNematicSimulator(args)
+    simulator = ActiveNematicSimulator(vars(args))
     simulator.run()
 
 if __name__ == "__main__":

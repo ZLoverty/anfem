@@ -29,7 +29,7 @@ def display_simulation_status():
     print("--- Simulation Progress Dashboard ---")
     print("-" * (BAR_LENGTH + 40)) # Adjust header length
 
-    status_files = glob.glob(str(STATUS_DIR / "**" / "log"), recursive=True)
+    status_files = glob.glob(str(STATUS_DIR / "**" / "anfem.log"), recursive=True)
 
     if not status_files:
         print("No simulation status files found yet.")
@@ -55,33 +55,17 @@ def display_simulation_status():
             status_message = "Pending..."
             progress_bar_str = get_progress_bar(0, 100) # Default to empty bar
 
-            if status_line.startswith("PROGRESS:"):
-                try:
-                    parts = status_line.split(":")[1].strip().split('/')
-                    current_step = int(parts[0])
-                    total_steps = int(parts[1])
-                    status_message = f"Running {current_step}/{total_steps}"
-                    progress_bar_str = get_progress_bar(current_step, total_steps)
-                    active_sims += 1
-                except (IndexError, ValueError):
-                    status_message = f"Invalid PROGRESS format: {status_line[:20]}..."
-            elif status_line.startswith("COMPLETED:"):
-                parts = status_line.split(":")[2].split(',')[1].split("=")[1]
-                status_message = f"Completed in {parts}"
-                progress_bar_str = get_progress_bar(100, 100) # Full bar
-            elif status_line.startswith("ERROR:"):
-                status_message = status_line
-                progress_bar_str = "Error!"
-            elif status_line.startswith("INTERRUPTED:"):
-                status_message = status_line
-                progress_bar_str = "Interrupted!"
-            elif status_line.startswith("EXITED_EARLY:"):
-                status_message = status_line
-                progress_bar_str = "Exited Early!"
-            else:
+            try:
                 status_message = f"{status_line[:20]}"
-
-            print(f"{sim_id: <30} {progress_bar_str}  {status_message}")
+                parts = status_line.split(" - ")[2].strip().split(",")[0].split('/')
+                current_step = int(parts[0])
+                total_steps = int(parts[1])
+                progress_bar_str = get_progress_bar(current_step, total_steps)
+                print(f"{sim_id: <30} {progress_bar_str} {status_message}")
+                active_sims += 1
+                
+            except (IndexError, ValueError):
+                status_message = f"Invalid PROGRESS format: {status_line[:20]}..."
 
         except FileNotFoundError:
             print(f"{sim_id: <30} [ File missing ] May have just completed or crashed.")
