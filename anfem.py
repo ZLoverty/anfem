@@ -1,5 +1,4 @@
-# anfem.py (Refactored structure)
-
+from petsc4py import PETSc
 import argparse
 import json
 import shutil
@@ -9,20 +8,19 @@ import numpy as np
 from dolfinx import fem, io, default_scalar_type
 from dolfinx.nls.petsc import NewtonSolver
 from mpi4py import MPI
-from petsc4py import PETSc
+
 from basix.ufl import element, mixed_element
 from ufl import (
     TestFunction, FacetNormal, Identity, div, inner, dx, ds,
     transpose, dot, as_vector, outer, lhs, rhs,
     TestFunctions, TrialFunctions, nabla_grad, derivative, CellDiameter, Measure
 )
-from utils import compute_average_mesh_size, Q2D, initialize_Q
+from utils import compute_average_mesh_size, Q2D
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 
 class ActiveNematicSimulator:
     """
@@ -72,6 +70,7 @@ class ActiveNematicSimulator:
     def setup_args(self, args):
         """overwrite the default values with provided args."""
 
+        # this dict defines the default params, unless arguments are passed through CLI, these params will be used for the simulation.
         self.args = {
             "mesh_dir": "mesh.msh",
             "total_time": 10,
@@ -83,7 +82,8 @@ class ActiveNematicSimulator:
             "wall_tags": [1],
             "save_dir": ".",
             "noslip": True,
-            "f": False
+            "f": False,
+            "init_noise": 0.1
         }
         
         for key in args:
@@ -122,7 +122,7 @@ class ActiveNematicSimulator:
         u_el = element("Lagrange", self.domain.topology.cell_name(), 2, shape=(2,))
         p_el = element("Lagrange", self.domain.topology.cell_name(), 1, shape=())
         Q1_el = element("Lagrange", self.domain.topology.cell_name(), 1, shape=(2, 2))
-        Q_el = element("Lagrange", self.domain.topology.cell_name(), 2, shape=(2, 2))
+        Q_el = element("Lagrange", self.domain.topology.cell_name(), 1, shape=(2, 2))
         vis_el = element("Lagrange", self.domain.topology.cell_name(), 1, shape=(2,))
         w_el = mixed_element([u_el, p_el])
 
@@ -250,30 +250,36 @@ class ActiveNematicSimulator:
         J = derivative(F2, Q_)
         problem = fem.petsc.NonlinearProblem(F2, Q_, J=J)
         solver = NewtonSolver(self.comm, problem)
+
+        
+        # solver.set_from_options()  # Must be called after setting PETSc options
         return solver
 
     def _initialize_states(self):
         """Initializes the Q-tensor."""
         Q_1_temp = fem.Function(self.function_spaces["V_Q1"])
-        Q_1_temp.x.array[:] = initialize_Q(self.domain)
+        Q_1_temp.x.array[:] = self._initialize_Q(noise=self.args["init_noise"])
         self.functions["Q_n"].interpolate(Q_1_temp)
         logger.info("Initial Q-tensor state set.")
 
+    def _initialize_Q(self, noise=0.1):
+        """Random initial Q-tensor."""
+        # Get the mesh coordinates
+        x = self.domain.geometry.x  # shape (n_points, 2)
+        d = np.ones((x.shape[0], 2))
+        d[:, 1] = noise * (0.5 - np.random.rand(x.shape[0]))
+        d /= np.linalg.norm(d, axis=1)[:, None]  # Normalize d
+
+        # Compute the Q-tensor: Q = S*(d⊗d - I/2)
+        Q_vals = np.einsum("ni,nj->nij", d, d) - 0.5 * np.eye(2)
+
+        # Reshape Q_vals to match the flattened dolfinx Function vector and set Q_n
+        return Q_vals.flatten()
+
     def _write_simulation_parameters(self):
         """Writes simulation parameters to a JSON file."""
-        params = {
-            "alpha": float(self.constants["alpha"]),
-            "lambda": float(self.constants["lambda_"]),
-            "rho_beta": self.constants["rho"],
-            "EA": float(self.constants["EA"]),
-            "total_time": self.args["total_time"],
-            "dt": self.args["dt"],
-            "save_dir": str(self.save_dir),
-            "wall_tags": self.args["wall_tags"],
-            "noslip_bc": self.args["noslip"],
-        }
         with open(self.save_dir / "params.json", 'w') as json_file:
-            json.dump(params, json_file, indent=4)
+            json.dump(self.args, json_file, indent=4)
         logger.info("Simulation parameters written to params.json.")
 
     def run(self):
@@ -347,6 +353,7 @@ def main():
     parser.add_argument("-o", "--save_dir", type=str, default=".")
     parser.add_argument("--noslip", help="Enable noslip boundary condition on all boundaries with tag in wall_tags", action='store_true')
     parser.add_argument("-f", action="store_true", help="Force create the mesh. Overwrite if the file already exists.")
+    parser.add_argument("--init_noise", type=float, default=0.1, help="Noise level of the initial director field. 0 for perfectly aligned in horizontal direction. 2 is close to totally random.")
     args = parser.parse_args()
 
     simulator = ActiveNematicSimulator(vars(args))

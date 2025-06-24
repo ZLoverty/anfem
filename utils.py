@@ -28,19 +28,7 @@ def Q2D(Q_tensor: fem.Function) -> np.array:
         S[i, 0] = vals.max()
     return d_vals, S
 
-def initialize_Q(domain, noise=0.1):
-    """Random initial Q-tensor."""
-    # Get the mesh coordinates
-    x = domain.geometry.x  # shape (n_points, 2)
-    d = np.ones((x.shape[0], 2))
-    d[:, 1] = noise * (0.5 - np.random.rand(x.shape[0]))
-    d /= np.linalg.norm(d, axis=1)[:, None]  # Normalize d
 
-    # Compute the Q-tensor: Q = S*(d⊗d - I/2)
-    Q_vals = np.einsum("ni,nj->nij", d, d) - 0.5 * np.eye(2)
-
-    # Reshape Q_vals to match the flattened dolfinx Function vector and set Q_n
-    return Q_vals.flatten()
 
 def compute_average_mesh_size(domain):
     """Compute the average mesh size."""
