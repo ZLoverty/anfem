@@ -1,80 +1,77 @@
 import gmsh
 import argparse
-import os
 from pathlib import Path
 
 class RatchetMeshGenerator:
 
-    def __init__(self, args):
-        self.save_dir = Path(args.o).expanduser().resolve()
-        self._force = args.f
+    def __init__(self, save_folder, params, exist_ok=False):
+        self.save_folder = Path(save_folder).expanduser().resolve()
+        self.params = params
+        self.exist_ok = exist_ok
         self.setup_directories()
-
-        self.W_TOTAL = args.w_total
-        self.H_TOTAL = args.h_total
-        self.h = args.H
-        self.m = self.h / 2 if args.m is None else args.m
-        self.l = 2 * self.h if args.l is None else args.l
-        self.w = 2 * self.h if args.w is None else args.w
-        self.N = args.N
         self.check_dimensions()
-
-        self.cl_outer = args.cl_outer  # Outer boundary characteristic length
-        self.cl_inner = args.cl_inner   # Channel characteristic length
     
     def setup_directories(self):
         """Check existence of the .msh file."""
-        if self.save_dir.exists() and not self._force:
-            print(f"Mesh {self.save_dir} already exists, abort ...")
+        if self.save_folder.exists() and not self.exist_ok:
+            print(f"Mesh already exists, abort ...")
             exit()
         else:
-            if self.save_dir.parent.exists() == False:
-                self.save_dir.parent.mkdir(parents=True)
+            if self.save_folder.parent.exists() == False:
+                self.save_folder.parent.mkdir(parents=True)
+        self.mesh_dir = str(self.save_folder / "mesh.msh")
 
     def check_dimensions(self):
         """Check if the channel exceeds the bounds of the pool."""
-        assert(self.H_TOTAL > 4*self.h + self.w)
-        assert(self.W_TOTAL > self.N*self.l + 2*self.m)
+        assert(self.params.h_total > 4*self.params.h + self.params.w)
+        assert(self.params.w_total > self.params.N*self.params.l + 2*self.params.m)
 
     def _find_starting_point(self):
         """Determine the starting point (x0, y0) of the ratchet."""
-        self.x0_bottom = 0.5 * (self.W_TOTAL - self.N * self.l - 2 * self.m)
-        self.y0_bottom = 0.5 * (self.H_TOTAL - 4 * self.h - self.w)
+        self.x0_bottom = 0.5 * (self.params.w_total - self.params.N * self.params.l - 2 * self.params.m)
+        self.y0_bottom = 0.5 * (self.params.h_total - 4 * self.params.h - self.params.w)
         self.x0_top = self.x0_bottom
-        self.y0_top = self.H_TOTAL - self.y0_bottom
+        self.y0_top = self.params.h_total - self.y0_bottom
 
     def create_ratchet(self, x_start, y_start, is_top):
         """
         Creates a ratchet surface tool.
         Returns the tag of the Plane Surface.
         """
+        h = self.params.h
+        m = self.params.m
+        l = self.params.l
+        cl_inner = self.params.cl_inner
+        cl_outer = self.params.cl_outer
+        N = self.params.N
+
         p_current = gmsh.model.occ.getMaxTag(0) + 1 # Get a fresh point tag
         
         # Starting points
-        p1 = self.occ.addPoint(x_start, y_start, 0, self.cl_inner, p_current)
-        y_offset = 2 * self.h if not is_top else -2 * self.h
-        p2 = self.occ.addPoint(x_start, y_start + y_offset, 0, self.cl_inner, p_current + 1)
+        p1 = self.occ.addPoint(x_start, y_start, 0, cl_inner, p_current)
+        y_offset = 2 * h if not is_top else -2 * h
+        p2 = self.occ.addPoint(x_start, y_start + y_offset, 0, cl_inner, p_current + 1)
 
         points = [p1, p2]
         
         # Loop over teeth
-        for i in range(self.N):
+        for i in range(N):
             y_direction = 1 if not is_top else -1
             # Use p_current for unique tags
             p_current = gmsh.model.occ.getMaxTag(0) + 1
             
             # Ratchet tooth corner points
-            pt1 = self.occ.addPoint(x_start + self.m + i * self.l, y_start + y_offset, 0, self.cl_inner, p_current)
-            pt2 = self.occ.addPoint(x_start + self.m + i * self.l, y_start + y_offset/2, 0, self.cl_inner, p_current + 1)
+            pt1 = self.occ.addPoint(x_start + m + i * l, y_start + y_offset, 0, cl_inner, p_current)
+            pt2 = self.occ.addPoint(x_start + m + i * l, y_start + y_offset/2, 0, cl_inner, p_current + 1)
             points.extend([pt1, pt2])
 
         # End points of the ratchet
         p_current = gmsh.model.occ.getMaxTag(0) + 1
-        end_x = x_start + self.m + self.N * self.l # Correctly use N instead of the loop variable i
+        end_x = x_start + m + N * l # Correctly use N instead of the loop variable i
         
-        pt_end1 = self.occ.addPoint(end_x, y_start + y_offset, 0, self.cl_inner, p_current)
-        pt_end2 = self.occ.addPoint(end_x + self.m, y_start + y_offset, 0, self.cl_inner, p_current+1)
-        pt_end3 = self.occ.addPoint(end_x + self.m, y_start, 0, self.cl_inner, p_current+2)
+        pt_end1 = self.occ.addPoint(end_x, y_start + y_offset, 0, cl_inner, p_current)
+        pt_end2 = self.occ.addPoint(end_x + m, y_start + y_offset, 0, cl_inner, p_current+1)
+        pt_end3 = self.occ.addPoint(end_x + m, y_start, 0, cl_inner, p_current+2)
         points.extend([pt_end1, pt_end2, pt_end3])
 
         # Create lines connecting all the points
@@ -90,9 +87,9 @@ class RatchetMeshGenerator:
         return surface
     
     def write_roi(self):
-        with open(self.save_dir, "a") as f:
+        with open(self.mesh_dir, "a") as f:
             f.write("$ROI\n")
-            f.write(f"{self.x0_bottom:f} {self.y0_bottom:f} {self.y0_top:f} {self.x0_bottom+self.N*self.l:f}\n")
+            f.write(f"{self.x0_bottom:f} {self.y0_bottom:f} {self.y0_top:f} {self.x0_bottom+self.params.N*self.params.l:f}\n")
             f.write("$ROI")
 
     def run(self):
@@ -106,7 +103,7 @@ class RatchetMeshGenerator:
         self.occ = gmsh.model.occ
 
         # --- 2. Create the outer rectangle ---
-        outer_rectangle = self.occ.addRectangle(0, 0, 0, self.W_TOTAL, self.H_TOTAL)
+        outer_rectangle = self.occ.addRectangle(0, 0, 0, self.params.w_total, self.params.h_total)
         self.occ.synchronize()
 
         # --- 3. Create the ratchet "tool" shapes using a helper function ---
@@ -135,7 +132,7 @@ class RatchetMeshGenerator:
             for point in boundary_points:
                 points.append(point)
 
-        gmsh.model.mesh.setSize(points, self.cl_outer)
+        gmsh.model.mesh.setSize(points, self.params.cl_outer)
 
         # Assign Physical Groups
         gmsh.model.addPhysicalGroup(2, [final_surface_tag], 1, "domain")
@@ -144,7 +141,7 @@ class RatchetMeshGenerator:
         self.occ.synchronize()
 
         gmsh.model.mesh.generate(2)
-        gmsh.write(os.path.join(self.save_dir))
+        gmsh.write(str(self.save_folder / "mesh.msh"))
 
         gmsh.finalize()
 

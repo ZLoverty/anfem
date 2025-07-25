@@ -6,6 +6,8 @@ from myimagelib.corrLib import corrS, distance_corr
 from myimagelib import xy_bin
 from scipy.optimize import curve_fit
 import pandas as pd
+from .actnem import SimulationParams
+from dataclasses import fields
 
 def Q2D(Q_tensor: fem.Function) -> np.array:
     """Convert Q-tensor to director for visualization.
@@ -185,3 +187,4 @@ def apply_periodic_bc(function: fem.Function):
     arr[dofs_top] = bottom_values
 
     return arr.flatten()
+

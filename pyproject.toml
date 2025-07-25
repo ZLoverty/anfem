@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anfem"
+version = "0.1.0"
+description = "Simulation software for active nematics in ratchet channels. Utilize Finite Element Method (FEM) based on the FEniCSx package."
+authors = [{ name = "Zhengyang Liu", email = "liuzy199111112@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+
+[project.urls]
+Homepage = "https://github.com/zloverty/anfem"
+
+[project.scripts]
+ansim = "anfem.cli:main"
+genmesh = "anfem.cli:genmesh"
+
+[tool.setuptools]
+packages = ["anfem"]

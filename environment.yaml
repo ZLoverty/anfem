@@ -1,0 +1,15 @@
+name: ansim
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - mpich
+  - fenics-dolfinx
+  - pyvista
+  - pyyaml
+  - h5py
+  - adios2
+  - scipy
+  - gmsh
+prefix: /Users/zhengyang/miniconda3/envs/ansim

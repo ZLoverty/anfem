@@ -1,6 +1,5 @@
 from petsc4py import PETSc
 import argparse
-import json
 import shutil
 import time
 from pathlib import Path
@@ -15,30 +14,32 @@ from ufl import (
     transpose, dot, as_vector, outer, lhs, rhs,
     TestFunctions, TrialFunctions, nabla_grad, derivative, CellDiameter, Measure
 )
-from utils import compute_average_mesh_size, Q2D
+from .utils import compute_average_mesh_size, Q2D
 import logging
+from simulation import Simulator
+import importlib.metadata
+from .config import Config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+test_folder = Config().test_folder
 
-class ActiveNematicSimulator:
+class ActiveNematicSimulator(Simulator):
     """
     Simulates the evolution of flow and director field in an active nematic system using FEniCSx.
     """
-    def __init__(self, args):
-        """
-        args -- a dictionary of arguments.
-        """
-        self.setup_args(args)
-        self.save_dir = Path(self.args["save_dir"]).expanduser().resolve()
-        self.mesh_dir = Path(self.args["mesh_dir"]).expanduser().resolve()
-        self.setup_directories()
-        self.log_file_path = self.save_dir / "anfem.log"
-        self._configure_file_logging()
+    def pre_run(self):
+        """Setup the simulation."""
+        version = importlib.metadata.version("anfem")
+        logging.info("============NEW SIMULATION============")
+        logging.info(f"------------Version: {version}------------")
+        logging.info(f"alpha = {self.params.alpha:.1f} | T = {self.params.T:.1f} | dt = {self.params.dt:.1f}")
+        logging.info("++++++++++++++++++++++++++++++++++++++")
+        self.save_params()
+        self.test_folder = Path(test_folder).expanduser().resolve()
 
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.Get_rank()
+
         self.domain, self.cell_tags, self.facet_tags = self._load_mesh()
         self.ds = Measure("ds", domain=self.domain, subdomain_data=self.facet_tags)
 
@@ -50,69 +51,34 @@ class ActiveNematicSimulator:
         self.solver_q = self._setup_q_tensor_solver()
 
         self._initialize_states()
-        self._write_simulation_parameters()
 
         self.avg_h = compute_average_mesh_size(self.domain)
-        self.writer = io.VTXWriter(self.comm, self.save_dir / "results.pvd",
-                                   output=[self.functions["p_n"], self.functions["u_vis"],
-                                           self.functions["Q_vis"], self.functions["S"]])
+        self.writer = io.VTXWriter(self.comm, self.data_dir, output=[self.functions["p_n"], self.functions["u_vis"],self.functions["Q_vis"], self.functions["S"]])
 
-    def setup_directories(self):
-        """Creates the save directory and copies the mesh file."""
-
-        if self.save_dir.exists() and not self.args["f"]:
-            print(f"Simulation {self.save_dir} already exists, abort ...")
-            exit()
-        else:
-            self.save_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(self.mesh_dir, self.save_dir / "mesh.msh")
-     
-    def setup_args(self, args):
-        """overwrite the default values with provided args."""
-
-        # this dict defines the default params, unless arguments are passed through CLI, these params will be used for the simulation.
-        self.args = {
-            "mesh_dir": "mesh.msh",
-            "total_time": 10,
-            "dt": 0.1,
-            "alpha": 5,
-            "lambda_": 0.7,
-            "rho_beta": 1.6,
-            "ea": 0.1,
-            "wall_tags": [1],
-            "save_dir": ".",
-            "noslip": True,
-            "f": False,
-            "init_noise": 0.1
-        }
         
-        for key in args:
-            if key in self.args:
-                self.args[key] = args[key]
-
-    def _configure_file_logging(self):
-        """Adds a file handler to the logger."""
-        file_handler = logging.FileHandler(self.log_file_path)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(file_handler)
-
     def _load_mesh(self):
         """Loads the mesh from the specified directory."""
-        logger.info(f"Loading mesh from {self.mesh_dir}")
-        domain, cell_tags, facet_tags = io.gmshio.read_from_msh(self.mesh_dir, self.comm, 0, gdim=2)
-        logger.info(f"All facet_tags: {np.unique(facet_tags.values)}")
+        
+        mesh_dir_ori = self.test_folder / "mesh.msh" # always generate mesh in the test folder first, then copy to save_folder
+        mesh_dir = self.save_folder / "mesh.msh"
+        shutil.move(mesh_dir_ori, mesh_dir)
+
+        logging.info(f"Loading mesh from {mesh_dir}")
+        domain, cell_tags, facet_tags = io.gmshio.read_from_msh(mesh_dir, self.comm, 0, gdim=2)
+        logging.info(f"All facet_tags: {np.unique(facet_tags.values)}")
+        
         return domain, cell_tags, facet_tags
 
     def _define_constants(self):
         """Defines and returns simulation constants."""
         constants = {
-            "alpha": fem.Constant(self.domain, PETSc.ScalarType(self.args["alpha"])),
-            "lambda_": fem.Constant(self.domain, PETSc.ScalarType(self.args["lambda_"])),
-            "rho": self.args['rho_beta'],
-            "beta1": fem.Constant(self.domain, PETSc.ScalarType(self.args["rho_beta"] - 1)),
-            "beta2": fem.Constant(self.domain, PETSc.ScalarType((self.args["rho_beta"] + 1) / self.args["rho_beta"]**2)),
-            "EA": fem.Constant(self.domain, PETSc.ScalarType(self.args["ea"])),
-            "k": fem.Constant(self.domain, PETSc.ScalarType(self.args["dt"])),
+            "alpha": fem.Constant(self.domain, PETSc.ScalarType(self.params.alpha)),
+            "lambda_": fem.Constant(self.domain, PETSc.ScalarType(self.params.lambda_)),
+            "rho": fem.Constant(self.domain, PETSc.ScalarType(self.params.rho_beta)),
+            "beta1": fem.Constant(self.domain, PETSc.ScalarType(self.params.rho_beta - 1)),
+            "beta2": fem.Constant(self.domain, PETSc.ScalarType((self.params.rho_beta + 1) / self.params.rho_beta**2)),
+            "EA": fem.Constant(self.domain, PETSc.ScalarType(self.params.ea)),
+            "k": fem.Constant(self.domain, PETSc.ScalarType(self.params.dt)),
             "gamma": fem.Constant(self.domain, PETSc.ScalarType(1.0e4)), # Penalty parameter for free-slip bc
         }
         return constants
@@ -179,11 +145,11 @@ class ActiveNematicSimulator:
         )
 
         bcs_u = []
-        if self.args["noslip"]:
-            logger.info("Applying NO-SLIP boundary condition at facets with tags: {}".format(self.args["wall_tags"]))
+        if self.params.noslip:
+            logging.info("Applying NO-SLIP boundary condition at facets with tags: {}".format(self.params.wall_tags))
             noslip_value = fem.Function(self.function_spaces["V_u"])
             noslip_value.x.array[:] = 0
-            for tag in self.args["wall_tags"]:
+            for tag in self.params.wall_tags:
                 # Check if the tag actually exists in the mesh
                 if self.facet_tags.find(tag).size > 0:
                     wall_dofs = fem.locate_dofs_topological(
@@ -191,11 +157,11 @@ class ActiveNematicSimulator:
                     )
                     bcs_u.append(fem.dirichletbc(noslip_value, wall_dofs, self.function_spaces["W"].sub(0)))
                 else:
-                    logger.warning(f"Wall tag {tag} not found in mesh. Skipping no-slip BC for this tag.")
+                    logging.warning(f"Wall tag {tag} not found in mesh. Skipping no-slip BC for this tag.")
         else:
-            logger.info("Applying FREE-SLIP boundary condition at facets with tags: {}".format(self.args["wall_tags"]))
+            logging.info("Applying FREE-SLIP boundary condition at facets with tags: {}".format(self.params.wall_tags))
             # Sum ds measures only for specified wall tags, handling potential empty list
-            wall_measures = sum([self.ds(tag) for tag in self.args["wall_tags"]], start=self.ds(0))
+            wall_measures = sum([self.ds(tag) for tag in self.params.wall_tags], start=self.ds(0))
             if wall_measures: # Only add if there are actual wall measures
                 F1 += (gamma / h) * inner(dot(u, n), dot(v, n)) * wall_measures
 
@@ -234,7 +200,7 @@ class ActiveNematicSimulator:
         bulk_free_energy_term = - inner(beta1 * Q_ - beta2 * inner(Q_, Q_) * Q_, phi) * dx
 
         # Surface anchoring term
-        wall_measures = sum((self.ds(tag) for tag in self.args["wall_tags"]), start=self.ds(0))
+        wall_measures = sum((self.ds(tag) for tag in self.params.wall_tags), start=self.ds(0))
         surface_anchoring_term = inner(EA * (Q_ - Qb), phi) * wall_measures if wall_measures else 0
 
         F2 = (
@@ -258,9 +224,9 @@ class ActiveNematicSimulator:
     def _initialize_states(self):
         """Initializes the Q-tensor."""
         Q_1_temp = fem.Function(self.function_spaces["V_Q1"])
-        Q_1_temp.x.array[:] = self._initialize_Q(noise=self.args["init_noise"])
+        Q_1_temp.x.array[:] = self._initialize_Q(noise=self.params.init_noise)
         self.functions["Q_n"].interpolate(Q_1_temp)
-        logger.info("Initial Q-tensor state set.")
+        logging.info("Initial Q-tensor state set.")
 
     def _initialize_Q(self, noise=0.1):
         """Random initial Q-tensor."""
@@ -276,18 +242,13 @@ class ActiveNematicSimulator:
         # Reshape Q_vals to match the flattened dolfinx Function vector and set Q_n
         return Q_vals.flatten()
 
-    def _write_simulation_parameters(self):
-        """Writes simulation parameters to a JSON file."""
-        with open(self.save_dir / "params.json", 'w') as json_file:
-            json.dump(self.args, json_file, indent=4)
-        logger.info("Simulation parameters written to params.json.")
-
-    def run(self):
+    def _run(self):
         """Executes the main simulation loop."""
-        logger.info(f"Simulation starts at {time.asctime()}!")
+        print(f"Simulation starts at {time.asctime()}")
+        logging.info(f"Simulation starts at {time.asctime()}!")
         t0 = time.time()
         t = 0.0
-        step_total = int(self.args["total_time"] / self.args["dt"])
+        step_total = int(self.params.T / self.params.dt)
 
         try:
             for i in range(step_total):
@@ -299,18 +260,18 @@ class ActiveNematicSimulator:
                 self.functions["S"].x.array[:] = Sv.flatten()                
                 self.writer.write(t)
 
-                t = (i + 1) * self.args["dt"] # Update time for next step
+                t = (i + 1) * self.params.dt # Update time for next step
 
                 # Compute Courant number
                 u_array = self.functions["u_vis"].x.array
                 if u_array.size > 0:
                     vmax = np.linalg.norm(u_array.reshape(-1, 2), axis=1).max()
-                    Cr = vmax * self.args["dt"] / self.avg_h
+                    Cr = vmax * self.params.dt / self.avg_h
                 else:
                     Cr = 0.0 # Handle case with no velocity data
 
                 if self.rank == 0:
-                    logger.info(f"{i+1}/{step_total}, Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s")
+                    logging.info(f"{i+1}/{step_total}, Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s")
 
                 # Solve Navier-Stokes equations
                 self.solver_ns.solve()
@@ -321,24 +282,26 @@ class ActiveNematicSimulator:
                 # Solve Q-tensor evolution equation
                 num_iterations, converged = self.solver_q.solve(self.functions["Q_"])
                 if not converged:
-                    logger.warning(f"Q-tensor solver did not converge at step {i+1}. Iterations: {num_iterations}")
+                    logging.warning(f"Q-tensor solver did not converge at step {i+1}. Iterations: {num_iterations}")
                 self.functions["Q_n"].interpolate(self.functions["Q_"])
 
             if self.rank == 0:
-                logger.info(f"COMPLETED: {step_total}/{step_total} : Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s")
+                logging.info(f"COMPLETED: {step_total}/{step_total} : Cr={Cr:.2f}, T_lapse={time.time()-t0:.0f} s")
 
         except Exception as e:
-            logger.error(f"An unexpected error occurred during simulation at step {i+1}: {e}", exc_info=True)
+            logging.error(f"An unexpected error occurred during simulation at step {i+1}: {e}", exc_info=True)
             if self.rank == 0:
-                logger.error(f"EXIT EARLY: {i+1}/{step_total}")
+                logging.error(f"EXIT EARLY: {i+1}/{step_total}")
         finally:
             self.writer.close()
-            logger.info("Simulation finished. VTX writer closed.")
-            # Ensure file handler is closed
-            for handler in logger.handlers:
-                if isinstance(handler, logging.FileHandler):
-                    handler.close()
-                    logger.removeHandler(handler)
+    
+    def post_run(self):
+        logging.info("Simulation completed.")
+    
+    def run(self):
+        self.pre_run()
+        self._run()
+        self.post_run()
 
 def main():
     parser = argparse.ArgumentParser(description="This script utilize the FEniCSx package to perform finite element method (FEM) to compute the evolution of the flow and the director field in an active nematic (AN) system, thus the name `anfem`.")
