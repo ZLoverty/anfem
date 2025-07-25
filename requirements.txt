@@ -1,0 +1,4 @@
+gmsh
+myimagelib
+git+https://github.com/ZLoverty/simulation.git
+-e .

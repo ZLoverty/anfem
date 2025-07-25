@@ -11,5 +11,3 @@ dependencies:
   - h5py
   - adios2
   - scipy
-  - gmsh
-prefix: /Users/zhengyang/miniconda3/envs/ansim
