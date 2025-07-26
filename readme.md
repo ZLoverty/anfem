@@ -6,16 +6,22 @@ Use FEM to solve the dynamics of active nematics bounded in channels.
 
 Requires `conda`.
 
-clone the repo
+#### Option 1: clone the repo and run setup script
 
 ```
 git clone https://github.com/ZLoverty/anfem.git
 cd anfem
-chmod +x setup.sh
 ./setup.sh
 ```
 
-To run the simulation with default parameters:
+## Run simulation 
+
+The package provides two CLI commands: 
+
+- `genmesh`: generate ratchet channel mesh.
+- `ansim`: run active nematics simulation.
+
+### With default parameters
 
 ```
 conda activate ansim
@@ -25,12 +31,7 @@ ansim
 
 The results can be found in `~/.ansim`.
 
-## Run simulation with custom parameters
-
-The package provides two CLI commands: 
-
-- `genmesh`: generate ratchet channel mesh.
-- `ansim`: run active nematics simulation.
+### With custom parameters
 
 To see the available options of these commands, use the `-h` flag to show the help string
 
@@ -60,3 +61,9 @@ These are all the available parameters that can be tuned for the command. As an 
 genmesh --N 4 --w 8
 ```
 
+Note that the software checks the existence of target files. If they exist, the simulation code aborts. To force overwrite existing files, use flag `-f`. 
+
+## To do
+
+- Graphical user guide 
+- pip install from GitHub
