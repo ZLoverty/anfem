@@ -13,14 +13,14 @@ class RatchetMeshGenerator:
     
     def setup_directories(self):
         """Check existence of the .msh file."""
-        if self.save_folder.exists() and not self.exist_ok:
+        self.mesh_dir = self.save_folder / "mesh.msh"
+        if self.mesh_dir.exists() and not self.exist_ok:
             print(f"Mesh already exists, abort ...")
             exit()
         else:
-            if self.save_folder.parent.exists() == False:
-                self.save_folder.parent.mkdir(parents=True)
-        self.mesh_dir = str(self.save_folder / "mesh.msh")
-
+            if self.save_folder.exists() == False:
+                self.save_folder.mkdir(parents=True)
+        
     def check_dimensions(self):
         """Check if the channel exceeds the bounds of the pool."""
         assert(self.params.h_total > 4*self.params.h + self.params.w)
