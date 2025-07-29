@@ -26,10 +26,14 @@ The package provides two CLI commands:
 ```
 conda activate ansim
 genmesh
-ansim
+ansim --save_folder ~/Documents/test
 ```
 
-The results can be found in `~/.ansim`.
+The results can be found in `~/Documents/test`. The folder consists 
+- `ansim.log`: simulation log, containing run time and Courant number;
+- `mesh.msh`: the mesh file, can be viewed by `gmsh`;
+- `params.yaml`: simulation parameters;
+- `results.pvd`: results data folder, can be loaded by ParaView.
 
 ### With custom parameters
 

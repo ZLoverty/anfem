@@ -17,6 +17,7 @@ Homepage = "https://github.com/zloverty/anfem"
 [project.scripts]
 ansim = "anfem.cli:main"
 genmesh = "anfem.cli:genmesh"
+genmesh_square = "anfem.cli:genmesh_square"
 
 [tool.setuptools]
 packages = ["anfem"]

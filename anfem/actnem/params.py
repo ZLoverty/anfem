@@ -30,5 +30,12 @@ class MeshParams:
     cl_outer: float = field(default=2.0, metadata={"help": "outer boundary mesh characteristic length, default 2"}) 
     cl_inner: float = field(default=1.0, metadata={"help": "inner boundary (channel) mesh characteristic length, default 1"}) # 
     w_total: float = field(default=80., metadata={"help": "total width of the pool, default 80"})  
-    h_total: float = field(default=80., metadata={"help": "total height of the pool, default 80"}) 
+    h_total: float = field(default=80., metadata={"help": "total height of the pool, default 80"})
+    L: float = field(default=100., metadata={"help": "Side length of square mesh. Only used for square mesh generator `genmesh_square`."})
+    cl: float = field(default=2., metadata={"help": "Boundary mesh characteristic length, default 2. Only used for square mesh generator `genmesh_square`."})
 
+@dataclass
+class SquareMeshParams:
+    """Dataclass to hold the default mesh parameters."""
+    L: float = field(default=100., metadata={"help": "Side length of square mesh. Only used for square mesh generator `genmesh_square`."})
+    cl: float = field(default=2., metadata={"help": "Boundary mesh characteristic length, default 2. Only used for square mesh generator `genmesh_square`."})

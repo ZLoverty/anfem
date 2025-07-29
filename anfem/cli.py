@@ -34,9 +34,9 @@ from pathlib import Path
 import argparse
 import logging
 from simulation import parse_params, available_keys
-from .actnem import SimulationParams, MeshParams
+from .actnem import SimulationParams, MeshParams, SquareMeshParams
 from .anfem import ActiveNematicSimulator
-from .mesh import RatchetMeshGenerator
+from .mesh import RatchetMeshGenerator, SquareMeshGenerator
 
 test_folder = Config().test_folder
 
@@ -87,3 +87,19 @@ def genmesh():
     generator = RatchetMeshGenerator(save_folder, params, exist_ok=args.f)
     generator.run()
 
+def genmesh_square():
+    """Generate square mesh."""
+    parser = argparse.ArgumentParser(f"This script generates ratchet channel mesh in a rectangular pool. Available options are {available_keys(SquareMeshParams())}.")
+    parser.add_argument("--save_folder", type=str, default=test_folder, help="folder to save the mesh (temporarily).")
+    parser.add_argument("-f", action="store_true")
+    parser.add_argument('--log-level', '-l',
+                        default='INFO',
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                        help='Set the logging level (default: INFO)')
+    # Parse known args; leave unknown ones (like --H, --N, etc.)
+    args, unknown = parser.parse_known_args()
+    save_folder = Path(args.save_folder).expanduser().resolve()
+    args_dict = parse_params(unknown, SquareMeshParams())
+    params = SquareMeshParams(**args_dict)
+    generator = SquareMeshGenerator(save_folder, params, exist_ok=args.f)
+    generator.run()

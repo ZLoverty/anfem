@@ -1,1 +1,2 @@
 from .gen_mesh import RatchetMeshGenerator
+from .gen_square_mesh import SquareMeshGenerator

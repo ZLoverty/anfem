@@ -1,1 +1,1 @@
-from .params import SimulationParams, MeshParams
+from .params import SimulationParams, MeshParams, SquareMeshParams
