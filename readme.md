@@ -20,6 +20,7 @@ The package provides two CLI commands:
 
 - `genmesh`: generate ratchet channel mesh.
 - `ansim`: run active nematics simulation.
+- `genmesh_square`: generate a simple square mesh. 
 
 ### With default parameters
 
@@ -42,6 +43,7 @@ To see the available options of these commands, use the `-h` flag to show the he
 ```
 genmesh -h
 ansim -h
+genmesh_square -h
 ```
 
 Example output:
@@ -65,7 +67,11 @@ These are all the available parameters that can be tuned for the command. As an 
 genmesh --N 4 --w 8
 ```
 
-Note that the software checks the existence of target files. If they exist, the simulation code aborts. To force overwrite existing files, use flag `-f`. 
+Note that the software checks the existence of target files. If they exist, the simulation code aborts. To force overwrite existing files, use flag `-f`. The mesh is always generated in the `test_folder` in `config.py` (default `~/.ansim`). Can be previewed by `gmsh`
+
+```
+gmsh mesh.msh
+```
 
 ## To do
 
